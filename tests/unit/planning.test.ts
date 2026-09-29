@@ -42,9 +42,7 @@ describe('Phase 7 planning layer', () => {
     expect(new StrategyAgent().definition.permissionLevel).toBe('LEVEL_1_GENERATE');
     expect(new IdeationAgent().definition.permissionLevel).toBe('LEVEL_1_GENERATE');
   });
-});
-
-  it('runs the complete four-agent planning pipeline with a deterministic provider', async () => {
+});  it('runs the complete four-agent planning pipeline with a deterministic provider', async () => {
     core = await createTestCore({ providers: [new PlanningFakeProvider()] });
     const result = await core.planning.execute({ goal: 'Plan a London fashion reel for Jovi.', createdBy: 'test' });
     expect(result.status).toBe('COMPLETED');
