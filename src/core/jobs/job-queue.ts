@@ -1,0 +1,235 @@
+import type Database from 'better-sqlite3';
+import { asc, eq } from 'drizzle-orm';
+import type { JoviDatabase } from '../../database/client.js';
+import { jobs } from '../../database/schema.js';
+import type { JobStatus } from '../../types/enums.js';
+import type { Logger } from '../config/logger.js';
+import { NotFoundError, ValidationError, errorMessage, isRetryable, serializeError } from '../errors.js';
+import type { CorrelationScope, EventBus } from '../events/event-bus.js';
+import { newId, nowIso } from '../ids.js';
+
+export type Job = typeof jobs.$inferSelect;
+
+export interface JobHandlerContext {
+  job: Job;
+  attempt: number;
+  scope: CorrelationScope;
+  logger: Logger;
+}
+
+export interface JobHandler {
+  execute(ctx: JobHandlerContext): Promise<unknown>;
+  /** Called once when the job reaches FAILED (retries exhausted or permanent error). */
+  onFinalFailure?(ctx: JobHandlerContext, error: unknown): void | Promise<void>;
+}
+
+export interface JobQueueOptions {
+  defaultMaxAttempts: number;
+  backoffMs: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const SOURCE = 'core.jobs';
+const TERMINAL: JobStatus[] = ['COMPLETED', 'FAILED', 'CANCELLED'];
+
+/**
+ * SQLite-backed job queue. A Job is one execution of a Task and may take
+ * several attempts. Temporary (retryable) failures are retried with
+ * exponential backoff; permanent failures fail fast.
+ *
+ * Two execution modes share the same code path:
+ *  - `run(jobId)`: the caller owns the job and drives it to a terminal state
+ *    (used for synchronous API/CLI requests). The job stays reserved via
+ *    `locked_at` so a background worker never steals it between retries.
+ *  - `processNext()`: a worker claims the next due, unreserved job and runs a
+ *    single attempt (used for asynchronous requests).
+ */
+export class JobQueue {
+  private readonly handlers = new Map<string, JobHandler>();
+  private readonly sleep: (ms: number) => Promise<void>;
+
+  constructor(
+    private readonly db: JoviDatabase,
+    private readonly sqlite: Database.Database,
+    private readonly bus: EventBus,
+    private readonly logger: Logger,
+    private readonly options: JobQueueOptions,
+  ) {
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+
+  registerHandler(type: string, handler: JobHandler): void {
+    this.handlers.set(type, handler);
+  }
+
+  enqueue(
+    input: { taskId: string; type: string; payload: unknown; maxAttempts?: number; reserve?: boolean },
+    scope: CorrelationScope,
+  ): Job {
+    if (!this.handlers.has(input.type)) throw new ValidationError(`No handler registered for job type ${input.type}`);
+    const now = nowIso();
+    const row = {
+      id: newId('job'),
+      taskId: input.taskId,
+      type: input.type,
+      status: 'QUEUED' as const,
+      payload: input.payload ?? {},
+      result: null,
+      attempts: 0,
+      maxAttempts: input.maxAttempts ?? this.options.defaultMaxAttempts,
+      lastError: null,
+      runAfter: now,
+      // Reserved jobs are driven by their creator via run(); workers skip them.
+      lockedAt: input.reserve ? now : null,
+      correlationId: scope.correlationId,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      completedAt: null,
+    };
+    this.db.insert(jobs).values(row).run();
+    scope.emit('JOB_CREATED', SOURCE, row.id, { taskId: row.taskId, type: row.type, maxAttempts: row.maxAttempts });
+    return row;
+  }
+
+  get(id: string): Job {
+    const row = this.find(id);
+    if (!row) throw new NotFoundError('Job', id);
+    return row;
+  }
+
+  find(id: string): Job | undefined {
+    return this.db.select().from(jobs).where(eq(jobs.id, id)).get();
+  }
+
+  listByTask(taskId: string): Job[] {
+    return this.db.select().from(jobs).where(eq(jobs.taskId, taskId)).orderBy(asc(jobs.createdAt)).all();
+  }
+
+  /** Drives an owned job through all attempts until it reaches a terminal state. */
+  async run(jobId: string): Promise<Job> {
+    for (;;) {
+      const current = this.get(jobId);
+      if (TERMINAL.includes(current.status)) return current;
+      if (current.status === 'RUNNING') {
+        throw new ValidationError(`Job ${jobId} is already running`);
+      }
+      const waitMs = Date.parse(current.runAfter) - Date.now();
+      if (waitMs > 0) await this.sleep(waitMs);
+      const claimed = this.claim(jobId);
+      if (!claimed) return this.get(jobId);
+      await this.attempt(claimed, true);
+    }
+  }
+
+  /** Worker entry point: claims and runs one attempt of the next due job. */
+  async processNext(): Promise<Job | null> {
+    const claimed = this.claimNext();
+    if (!claimed) return null;
+    return this.attempt(claimed, false);
+  }
+
+  cancel(jobId: string, scope: CorrelationScope): Job {
+    const job = this.get(jobId);
+    if (TERMINAL.includes(job.status)) return job;
+    this.update(jobId, { status: 'CANCELLED', lockedAt: null, completedAt: nowIso() });
+    scope.emit('JOB_CANCELLED', SOURCE, jobId, { taskId: job.taskId });
+    return this.get(jobId);
+  }
+
+  /** Crash recovery: RUNNING jobs whose lock is older than `staleMs` go back to RETRYING. */
+  recoverStale(staleMs: number): number {
+    const cutoff = new Date(Date.now() - staleMs).toISOString();
+    const result = this.sqlite
+      .prepare(
+        `UPDATE jobs SET status = 'RETRYING', locked_at = NULL, updated_at = @now
+         WHERE status = 'RUNNING' AND locked_at IS NOT NULL AND locked_at < @cutoff`,
+      )
+      .run({ cutoff, now: nowIso() });
+    return result.changes;
+  }
+
+  private claim(jobId: string): Job | null {
+    const now = nowIso();
+    const row = this.sqlite
+      .prepare(
+        `UPDATE jobs SET status = 'RUNNING', attempts = attempts + 1, locked_at = @now, updated_at = @now,
+                started_at = COALESCE(started_at, @now)
+         WHERE id = @id AND status IN ('QUEUED', 'RETRYING')
+         RETURNING id`,
+      )
+      .get({ id: jobId, now }) as { id: string } | undefined;
+    return row ? this.get(row.id) : null;
+  }
+
+  private claimNext(): Job | null {
+    const now = nowIso();
+    const row = this.sqlite
+      .prepare(
+        `UPDATE jobs SET status = 'RUNNING', attempts = attempts + 1, locked_at = @now, updated_at = @now,
+                started_at = COALESCE(started_at, @now)
+         WHERE id = (
+           SELECT id FROM jobs
+           WHERE status IN ('QUEUED', 'RETRYING') AND run_after <= @now AND locked_at IS NULL
+           ORDER BY run_after ASC, created_at ASC
+           LIMIT 1
+         )
+         RETURNING id`,
+      )
+      .get({ now }) as { id: string } | undefined;
+    return row ? this.get(row.id) : null;
+  }
+
+  private async attempt(job: Job, owned: boolean): Promise<Job> {
+    const handler = this.handlers.get(job.type);
+    const scope = this.bus.scope(job.correlationId);
+    const logger = this.logger.child({ jobId: job.id, taskId: job.taskId, correlationId: job.correlationId, attempt: job.attempts });
+    const ctx: JobHandlerContext = { job, attempt: job.attempts, scope, logger };
+
+    scope.emit('JOB_STARTED', SOURCE, job.id, { taskId: job.taskId, attempt: job.attempts, maxAttempts: job.maxAttempts });
+    const started = Date.now();
+
+    try {
+      if (!handler) throw new ValidationError(`No handler registered for job type ${job.type}`);
+      const result = await handler.execute(ctx);
+      this.update(job.id, { status: 'COMPLETED', result: result ?? null, lockedAt: null, completedAt: nowIso() });
+      scope.emit('JOB_COMPLETED', SOURCE, job.id, { taskId: job.taskId, attempt: job.attempts, durationMs: Date.now() - started });
+      logger.info({ durationMs: Date.now() - started, retries: job.attempts - 1 }, 'job completed');
+    } catch (error) {
+      const serialized = serializeError(error);
+      const canRetry = isRetryable(error) && job.attempts < job.maxAttempts;
+      if (canRetry) {
+        const delay = this.options.backoffMs * 2 ** (job.attempts - 1);
+        this.update(job.id, {
+          status: 'RETRYING',
+          lastError: serialized,
+          runAfter: new Date(Date.now() + delay).toISOString(),
+          // Owned jobs stay reserved so workers never steal them between attempts.
+          lockedAt: owned ? nowIso() : null,
+        });
+        scope.emit('JOB_RETRYING', SOURCE, job.id, { taskId: job.taskId, attempt: job.attempts, delayMs: delay, error: serialized });
+        logger.warn({ err: errorMessage(error), delayMs: delay }, 'job attempt failed; retrying');
+      } else {
+        this.update(job.id, { status: 'FAILED', lastError: serialized, lockedAt: null, completedAt: nowIso() });
+        scope.emit('JOB_FAILED', SOURCE, job.id, { taskId: job.taskId, attempt: job.attempts, error: serialized });
+        logger.error({ err: errorMessage(error), retries: job.attempts - 1 }, 'job failed');
+        if (handler?.onFinalFailure) {
+          try {
+            await handler.onFinalFailure(ctx, error);
+          } catch (hookError) {
+            logger.error({ err: errorMessage(hookError) }, 'job onFinalFailure hook failed');
+          }
+        }
+      }
+    }
+    return this.get(job.id);
+  }
+
+  private update(id: string, fields: Partial<Job>): void {
+    this.db
+      .update(jobs)
+      .set({ ...fields, updatedAt: nowIso() })
+      .where(eq(jobs.id, id))
+      .run();
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "name": "jovi-creator-os",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Jovi Creator OS — autonomous AI creator system. Phase 6: Jovi Core v0.1 (the core brain).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ollama": "JOVI_OLLAMA_INTEGRATION=1 vitest run tests/integration/ollama.integration.test.ts",
+    "dev": "tsx watch apps/api/main.ts",
+    "start": "node dist/apps/api/main.js",
+    "start:dev": "tsx apps/api/main.ts",
+    "jovi": "tsx apps/orchestrator/cli.ts",
+    "jovi:mock": "tsx apps/orchestrator/cli.ts --mock",
+    "jovi:providers": "tsx apps/orchestrator/cli.ts --providers",
+    "worker": "tsx apps/orchestrator/worker.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/database/scripts/migrate.ts",
+    "db:seed": "tsx src/database/scripts/seed.ts",
+    "db:reset": "tsx src/database/scripts/reset.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "drizzle-orm": "^0.45.3",
+    "fastify": "^5.12.5",
+    "pino": "^10.3.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.20.4",
+    "drizzle-kit": "^0.31.11",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

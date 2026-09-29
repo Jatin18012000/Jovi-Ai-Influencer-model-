@@ -1,0 +1,36 @@
+# Jovi Core v0.1
+#   docker compose up --build                     # API only (uses host Ollama / cloud keys from .env)
+#   docker compose --profile ollama up --build    # API + bundled Ollama container
+services:
+  jovi-core:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATABASE_URL: data/jovi.db
+      OLLAMA_URL: ${OLLAMA_URL_DOCKER:-http://host.docker.internal:11434}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      # Bound to localhost only; put a reverse proxy + JOVI_API_TOKEN in front for remote access.
+      - 127.0.0.1:3000:3000
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  ollama:
+    profiles: [ollama]
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - 127.0.0.1:11434:11434
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
