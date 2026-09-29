@@ -2,8 +2,10 @@ import { existsSync, rmSync } from 'node:fs';
 import { loadConfig } from '../../core/config/config.js';
 import { openDatabase, resolveDatabasePath, runMigrations } from '../client.js';
 import { seedDatabase } from '../seed.js';
+import { loadEnvFile } from '../../core/config/load-env.js';
 
 /** `npm run db:reset` — deletes the local SQLite database and recreates it (development only). */
+loadEnvFile();
 const config = loadConfig();
 if (config.env === 'production') {
   console.error('Refusing to reset the database when NODE_ENV=production.');

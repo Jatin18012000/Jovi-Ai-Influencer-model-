@@ -1,6 +1,9 @@
 # Jovi Core v0.1
-#   docker compose up --build                     # API only (uses host Ollama / cloud keys from .env)
-#   docker compose --profile ollama up --build    # API + bundled Ollama container
+#   docker compose up --build
+#
+# LM Studio (Jovi's only local-model runtime) runs on the host, not in a container:
+# start its local server (Developer → Start Server, or `lms server start`) and load a model.
+# The container reaches it through host.docker.internal.
 services:
   jovi-core:
     build:
@@ -13,24 +16,14 @@ services:
       HOST: 0.0.0.0
       PORT: 3000
       DATABASE_URL: data/jovi.db
-      OLLAMA_URL: ${OLLAMA_URL_DOCKER:-http://host.docker.internal:11434}
+      LM_STUDIO_URL: ${LM_STUDIO_URL_DOCKER:-http://host.docker.internal:1234/v1}
+      # The API binds 0.0.0.0 inside the container, but the published port below is
+      # loopback-only. Set JOVI_API_TOKEN (in .env) before publishing it more widely.
+      JOVI_ALLOW_UNAUTHENTICATED_NETWORK: "true"
     extra_hosts:
       - host.docker.internal:host-gateway
     ports:
-      # Bound to localhost only; put a reverse proxy + JOVI_API_TOKEN in front for remote access.
       - 127.0.0.1:3000:3000
     volumes:
       - ./data:/app/data
     restart: unless-stopped
-
-  ollama:
-    profiles: [ollama]
-    image: ollama/ollama:latest
-    volumes:
-      - ollama-models:/root/.ollama
-    ports:
-      - 127.0.0.1:11434:11434
-    restart: unless-stopped
-
-volumes:
-  ollama-models:

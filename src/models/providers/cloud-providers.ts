@@ -49,6 +49,7 @@ abstract class CloudProvider implements ModelProvider {
     return {
       provider: this.id,
       model,
+      executionType: 'CLOUD',
       output,
       usage,
       latencyMs: Date.now() - started,

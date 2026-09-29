@@ -70,6 +70,7 @@ export const EventType = z.enum([
   'JOB_RETRYING',
   'JOB_FAILED',
   'JOB_CANCELLED',
+  'JOB_RECOVERED',
   'DECISION_CREATED',
   'DECISION_EVALUATED',
   'DECISION_SELECTED',

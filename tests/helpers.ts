@@ -17,7 +17,7 @@ export async function createTestCore(
     JOVI_LOG_LEVEL: 'silent',
     JOVI_JOB_BACKOFF_MS: '0',
     JOVI_PROVIDER_STATUS_TTL_MS: '0',
-    OLLAMA_ENABLED: 'false',
+    LM_STUDIO_ENABLED: 'false',
     ...options.env,
   });
   return createJoviCore({

@@ -1,6 +1,6 @@
-import { eq } from 'drizzle-orm';
+import { eq, notInArray } from 'drizzle-orm';
 import type { Logger } from '../../core/config/logger.js';
-import { errorMessage } from '../../core/errors.js';
+import { ValidationError, errorMessage } from '../../core/errors.js';
 import { nowIso } from '../../core/ids.js';
 import type { JoviDatabase } from '../../database/client.js';
 import { models } from '../../database/schema.js';
@@ -23,9 +23,28 @@ export class ProviderRegistry {
     private readonly ttlMs: number,
   ) {}
 
+  /**
+   * Simulation isolation: the MOCK provider can never be registered alongside
+   * real providers, so it can never become a silent production fallback.
+   */
   register(provider: ModelProvider): void {
+    const existing = this.list();
+    const mixesMock =
+      (provider.kind === 'MOCK' && existing.some((p) => p.kind !== 'MOCK')) ||
+      (provider.kind !== 'MOCK' && existing.some((p) => p.kind === 'MOCK'));
+    if (mixesMock) {
+      throw new ValidationError(
+        `Refusing to register ${provider.id}: the MockProvider is simulation-only and cannot be combined with real providers.`,
+      );
+    }
     this.providers.set(provider.id, provider);
     this.lastRefresh = 0;
+  }
+
+  /** True when only simulated (MOCK) providers are registered. */
+  isSimulation(): boolean {
+    const all = this.list();
+    return all.length > 0 && all.every((p) => p.kind === 'MOCK');
   }
 
   get(id: string): ModelProvider | undefined {
@@ -88,6 +107,12 @@ export class ProviderRegistry {
   private syncModelsTable(statuses: ProviderStatus[]): void {
     const now = nowIso();
     this.db.transaction((tx) => {
+      // Providers that are no longer registered (e.g. removed runtimes) must not look available.
+      const registered = statuses.map((s) => s.provider);
+      tx.update(models)
+        .set({ status: 'UNAVAILABLE', statusReason: 'provider not registered in this deployment', isDefault: false, lastCheckedAt: now, updatedAt: now })
+        .where(registered.length ? notInArray(models.provider, registered) : undefined)
+        .run();
       for (const status of statuses) {
         // Previously known models for this provider become unavailable unless re-reported.
         tx.update(models)

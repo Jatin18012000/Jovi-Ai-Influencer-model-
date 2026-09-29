@@ -2,15 +2,16 @@ import { timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyBaseLogger, type FastifyError, type FastifyInstance } from 'fastify';
 import { z, ZodError } from 'zod';
 import type { JoviCore } from '../../src/core/bootstrap.js';
-import { JoviError, NotFoundError, PermissionDeniedError, ValidationError } from '../../src/core/errors.js';
+import { ConflictError, JoviError, NotFoundError, PermissionDeniedError, RateLimitedError, ValidationError } from '../../src/core/errors.js';
 import { newId } from '../../src/core/ids.js';
 import { GoalRequestSchema } from '../../src/core/orchestrator/orchestrator.js';
 import { PERMISSION_DESCRIPTIONS } from '../../src/core/permissions/permissions.js';
 import { models as modelsTable } from '../../src/database/schema.js';
-import { MemoryInputSchema } from '../../src/memory/operational/operational-memory.js';
+import { ExternalMemoryInputSchema } from '../../src/memory/operational/operational-memory.js';
 import { assessCompetition } from '../../src/models/competition/model-competition.js';
 import { EvaluableOptionSchema } from '../../src/models/evaluator/rule-checks.js';
 import { EventType, MemoryType } from '../../src/types/enums.js';
+import { ExpensiveCallLimiter } from './security.js';
 
 const IdParams = z.object({ id: z.string().min(1).max(100) });
 
@@ -43,11 +44,21 @@ const EvaluateBody = z.union([
  * Fastify API. Handlers are thin: validate with Zod, delegate to the core,
  * shape the response. All business logic lives in `src/`.
  */
-export function buildApiServer(core: JoviCore): FastifyInstance {
+export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCallLimiter } = {}): FastifyInstance {
   const app = Fastify({
     loggerInstance: core.logger.child({ component: 'api' }) as FastifyBaseLogger,
     bodyLimit: 256 * 1024,
   });
+  const limiter = options.limiter ?? new ExpensiveCallLimiter(core.config.api.goalRateLimitPerMinute, core.config.api.maxConcurrentGoals);
+  /** Runs an expensive (model-calling) handler under the rate limit and concurrency cap. */
+  const guarded = async <T>(clientKey: string, fn: () => Promise<T>): Promise<T> => {
+    const release = limiter.acquire(clientKey);
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  };
 
   // Optional bearer-token auth (everything except /health).
   const token = core.config.api.token;
@@ -69,6 +80,10 @@ export function buildApiServer(core: JoviCore): FastifyInstance {
     if (error instanceof NotFoundError) return reply.code(404).send({ error: error.code, message: error.message });
     if (error instanceof ValidationError) return reply.code(400).send({ error: error.code, message: error.message });
     if (error instanceof PermissionDeniedError) return reply.code(403).send({ error: error.code, message: error.message });
+    if (error instanceof ConflictError) return reply.code(409).send({ error: error.code, message: error.message });
+    if (error instanceof RateLimitedError) {
+      return reply.code(429).header('retry-after', String(error.retryAfterSeconds)).send({ error: error.code, message: error.message });
+    }
     if (error instanceof JoviError) return reply.code(500).send({ error: error.code, message: error.message });
     const statusCode = 'statusCode' in error && typeof error.statusCode === 'number' ? error.statusCode : 500;
     if (statusCode >= 500) request.log.error({ err: error }, 'unhandled error');
@@ -84,7 +99,9 @@ export function buildApiServer(core: JoviCore): FastifyInstance {
       version: '0.1.0',
       phase: 6,
       database: 'ok',
-      providers: statuses.map((s) => ({ provider: s.provider, available: s.available, model: s.selectedModel })),
+      simulationMode: core.providers.isSimulation(),
+      providers: statuses.map((s) => ({ provider: s.provider, kind: s.kind, available: s.available, model: s.selectedModel, reason: s.reason })),
+      lmStudio: statuses.find((s) => s.provider === 'lmstudio')?.details ?? { registered: false },
       anyModelAvailable: statuses.some((s) => s.available),
       uptimeSeconds: Math.round(process.uptime()),
     };
@@ -107,7 +124,7 @@ export function buildApiServer(core: JoviCore): FastifyInstance {
 
   app.post('/api/jovi/goal', async (request, reply) => {
     const body = GoalRequestSchema.parse(request.body ?? {});
-    const result = await core.orchestrator.executeGoal(body);
+    const result = await guarded(request.ip, () => core.orchestrator.executeGoal({ ...body, createdBy: 'api' }));
     if (body.mode === 'async') return reply.code(202).send(result);
     if (result.status === 'FAILED') {
       const code = (result.error as { code?: string } | null)?.code;
@@ -153,10 +170,12 @@ export function buildApiServer(core: JoviCore): FastifyInstance {
 
   // --- Memory ---------------------------------------------------------------
 
+  // External memory is untrusted: restricted types, forced source "api", capped
+  // importance, and it can never overwrite seed/agent memory (see writeExternal).
   app.post('/api/memory', async (request, reply) => {
-    const body = MemoryInputSchema.parse(request.body ?? {});
+    const body = ExternalMemoryInputSchema.parse(request.body ?? {});
     const scope = core.events.scope(newId('correlation'));
-    const { item, created } = core.memory.upsert(body, scope);
+    const { item, created } = core.memory.writeExternal(body, scope);
     return reply.code(created ? 201 : 200).send({ item, created });
   });
 
@@ -183,10 +202,12 @@ export function buildApiServer(core: JoviCore): FastifyInstance {
       models,
       competition: assessCompetition(statuses),
       routingPolicy: {
-        LOW: 'prefer local (Ollama); cloud fallback',
-        NORMAL: 'prefer configured cloud; local fallback',
-        HIGH: 'cloud; local only as degraded fallback',
+        LOW: `LM Studio (local)${core.config.providers.allowCloudFallback ? '; cloud fallback' : '; cloud fallback disabled'}`,
+        NORMAL: 'prefer configured cloud; LM Studio fallback',
+        HIGH: 'cloud; LM Studio only as degraded fallback',
         STRATEGIC: 'cloud + independent evaluator when available',
+        LOCAL_ONLY: 'LM Studio only',
+        mock: 'simulation mode only; never a fallback',
         cloudPreference: core.config.providers.cloudPreference,
       },
     };
@@ -202,6 +223,10 @@ export function buildApiServer(core: JoviCore): FastifyInstance {
 
   app.post('/api/evaluate', async (request) => {
     const body = EvaluateBody.parse(request.body ?? {});
+    return guarded(request.ip, () => evaluate(body));
+  });
+
+  const evaluate = async (body: z.infer<typeof EvaluateBody>) => {
     const correlationId = newId('correlation');
     const scope = core.events.scope(correlationId);
     const identity = core.identity.getActive();
@@ -228,7 +253,7 @@ export function buildApiServer(core: JoviCore): FastifyInstance {
     const evaluation = await core.evaluator.evaluate({
       objective,
       options,
-      knownPillars: identity.profile.contentCategories,
+      identity: identity.profile,
       generatorModels,
       mode: body.mode,
       decisionId,
@@ -236,7 +261,7 @@ export function buildApiServer(core: JoviCore): FastifyInstance {
       trace: { purpose: 'evaluation', correlationId, scope },
     });
     return { correlationId, evaluation };
-  });
+  };
 
   return app;
 }

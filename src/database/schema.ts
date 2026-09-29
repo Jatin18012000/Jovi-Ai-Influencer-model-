@@ -101,6 +101,8 @@ export const agentRuns = sqliteTable(
     input: text('input', { mode: 'json' }).$type<Json>(),
     output: text('output', { mode: 'json' }).$type<Json>(),
     contextSummary: text('context_summary', { mode: 'json' }).$type<Json>(),
+    /** Every ToolKit call made during the run, allowed or denied (permission audit trail). */
+    toolCalls: text('tool_calls', { mode: 'json' }).$type<Json>(),
     error: text('error', { mode: 'json' }).$type<Json>(),
     startedAt: text('started_at').notNull(),
     completedAt: text('completed_at'),

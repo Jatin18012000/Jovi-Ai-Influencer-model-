@@ -24,6 +24,10 @@ export function minLevel(a: PermissionLevel, b: PermissionLevel): PermissionLeve
   return permissionRank(a) <= permissionRank(b) ? a : b;
 }
 
+export function maxLevel(a: PermissionLevel, b: PermissionLevel): PermissionLevel {
+  return permissionRank(a) >= permissionRank(b) ? a : b;
+}
+
 /**
  * Tools are the only way an agent touches the world. Each tool declares the
  * permission level it requires. There is deliberately no shell, filesystem or
@@ -35,6 +39,7 @@ export const TOOL_REGISTRY = {
   'memory.read': { level: 'LEVEL_0_READ', description: 'Read operational memory.' },
   'knowledge.read': { level: 'LEVEL_0_READ', description: 'Read the Markdown knowledge base.' },
   'decision.read': { level: 'LEVEL_0_READ', description: 'Read past decisions.' },
+  'agent.read': { level: 'LEVEL_0_READ', description: 'Read the agent directory (names, permission levels).' },
   'model.generate': { level: 'LEVEL_1_GENERATE', description: 'Generate via the Model Router.' },
   'model.evaluate': { level: 'LEVEL_1_GENERATE', description: 'Evaluate options via the Evaluator.' },
   'decision.write': { level: 'LEVEL_2_MODIFY', description: 'Persist decisions.' },
@@ -85,13 +90,21 @@ export class PermissionGuard {
     }
   }
 
-  /** Classifies a free-text proposed action by the permission level it would need. */
+  /**
+   * Classifies a free-text proposed action by the permission level its text
+   * implies. This is a floor, not the verdict: see `requiredLevelForAction`,
+   * which also applies the owning agent's declared level.
+   */
   static classifyAction(action: string): PermissionLevel {
     const text = action.toLowerCase();
     if (/\b(deploy|infrastructure|server|credential|api key|shell|terminal|delete (the )?database)\b/.test(text)) {
       return 'LEVEL_5_INFRASTRUCTURE';
     }
-    if (/\b(publish|post(ing)? (it|to|on)|upload|go live|schedule (the )?post|send (a )?(dm|message|email)|dm |reply to|comment on|launch ads?|boost)\b/.test(text)) {
+    const external =
+      /\b(publish|post(ing|ed)?|upload|go(ing)? live|schedul(e|ing)|send|email|e-mail|dm|message|reply|comment|tag|share|launch ads?|boost|promot(e|ion)|pitch|contact|outreach|collab request)\b/.test(
+        text,
+      ) || /\b(instagram|tiktok|youtube|threads|facebook|twitter|x\.com|snapchat|linkedin|pinterest)\b/.test(text);
+    if (external) {
       return 'LEVEL_4_EXTERNAL_ACTION';
     }
     if (/\b(generate|render|create (the )?(image|video|visual)|produce|film|shoot)\b/.test(text)) {
@@ -99,4 +112,14 @@ export class PermissionGuard {
     }
     return 'LEVEL_1_GENERATE';
   }
+}
+
+/**
+ * Level a proposed next action requires: the higher of what its text implies
+ * and the declared permission level of the agent that would perform it. An
+ * action owned by the publishing agent is external no matter how it is worded.
+ */
+export function requiredLevelForAction(action: string, owningAgentLevel: PermissionLevel | null): PermissionLevel {
+  const textual = PermissionGuard.classifyAction(action);
+  return owningAgentLevel ? maxLevel(textual, owningAgentLevel) : textual;
 }

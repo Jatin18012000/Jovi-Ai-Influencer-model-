@@ -1,4 +1,5 @@
 import { createJoviCore } from '../../src/core/bootstrap.js';
+import { loadEnvFile } from '../../src/core/config/load-env.js';
 
 /**
  * Standalone job worker (`npm run worker`). Processes asynchronous goals
@@ -6,6 +7,7 @@ import { createJoviCore } from '../../src/core/bootstrap.js';
  * Use this when the API runs with JOVI_WORKER_ENABLED=false.
  */
 async function main(): Promise<void> {
+  loadEnvFile();
   const core = await createJoviCore();
   core.worker.start();
   const shutdown = async () => {

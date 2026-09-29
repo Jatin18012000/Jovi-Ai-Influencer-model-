@@ -45,6 +45,8 @@ export interface CostEstimate {
 export interface GenerateResult {
   provider: string;
   model: string;
+  /** Where inference ran: CLOUD API, LOCAL runtime (LM Studio) or MOCK simulation. */
+  executionType: ProviderKind;
   output: string;
   usage: TokenUsage;
   latencyMs: number;
@@ -58,6 +60,8 @@ export interface ModelDescriptor {
   kind: ProviderKind;
   isDefault: boolean;
   capabilities: string[];
+  /** Whether the model is loaded in memory (local runtimes); null when unknown. */
+  loaded?: boolean | null;
 }
 
 export interface ProviderStatus {
@@ -69,6 +73,8 @@ export interface ProviderStatus {
   selectedModel: string | null;
   models: ModelDescriptor[];
   checkedAt: string;
+  /** Provider-specific discovery details (e.g. LM Studio reachability and loaded models). */
+  details?: Record<string, unknown>;
 }
 
 /**

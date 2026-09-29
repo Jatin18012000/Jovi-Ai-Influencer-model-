@@ -15,16 +15,16 @@ export class JobWorker {
     private readonly jobs: JobQueue,
     private readonly logger: Logger,
     private readonly pollMs: number,
-    private readonly staleLockMs = 15 * 60_000,
+    private readonly staleLockMs: number,
   ) {}
+
+  private lastRecovery = 0;
 
   start(): void {
     if (this.running) return;
     this.running = true;
-    const recovered = this.jobs.recoverStale(this.staleLockMs);
-    if (recovered) this.logger.warn({ recovered }, 'recovered stale jobs');
     this.schedule(0);
-    this.logger.info({ pollMs: this.pollMs }, 'job worker started');
+    this.logger.info({ pollMs: this.pollMs, staleLockMs: this.staleLockMs }, 'job worker started');
   }
 
   async stop(): Promise<void> {
@@ -50,6 +50,11 @@ export class JobWorker {
     this.busy = true;
     let worked = false;
     try {
+      // Periodic crash recovery, so abandoned jobs are resumed without a restart.
+      if (Date.now() - this.lastRecovery >= Math.min(this.staleLockMs, 60_000)) {
+        this.lastRecovery = Date.now();
+        await this.jobs.recoverStale(this.staleLockMs);
+      }
       worked = (await this.jobs.processNext()) !== null;
     } catch (error) {
       this.logger.error({ err: errorMessage(error) }, 'worker tick failed');

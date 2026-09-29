@@ -15,7 +15,7 @@ export interface SemanticMatch {
 
 /**
  * Semantic memory contract. Phase 6 ships a lexical baseline; a vector
- * implementation (e.g. sqlite-vec + local embeddings via Ollama) can replace
+ * implementation (e.g. sqlite-vec + local embeddings served by LM Studio) can replace
  * it later without touching callers.
  */
 export interface SemanticMemory {

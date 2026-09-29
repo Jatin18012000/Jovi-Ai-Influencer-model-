@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { JoviCore } from '../../src/core/bootstrap.js';
 import { newId } from '../../src/core/ids.js';
 import { evaluations } from '../../src/database/schema.js';
+import { APPROVED_JOVI_IDENTITY } from '../../src/database/seed/identity.js';
 import { runRuleChecks } from '../../src/models/evaluator/rule-checks.js';
 import { mockExecutiveProposal, MockProvider } from '../../src/models/providers/mock-provider.js';
 import { competingMocks, createTestCore, TEST_GOAL } from '../helpers.js';
@@ -98,7 +99,7 @@ describe('Evaluator', () => {
     const result = await core.evaluator.evaluate({
       objective: 'Introduce Jovi',
       options,
-      knownPillars: PILLARS,
+      identity: APPROVED_JOVI_IDENTITY,
       generatorModels: ['mock-cloud:cloud-model'],
       trace: { purpose: 'evaluation', correlationId, scope: core.events.scope(correlationId) },
     });
@@ -116,7 +117,7 @@ describe('Evaluator', () => {
     const result = await core.evaluator.evaluate({
       objective: 'Introduce Jovi',
       options,
-      knownPillars: PILLARS,
+      identity: APPROVED_JOVI_IDENTITY,
       generatorModels: ['mock:jovi-mock-v1'],
       trace: { purpose: 'evaluation', correlationId: 'c' },
     });
@@ -133,7 +134,7 @@ describe('Evaluator', () => {
     const result = await core.evaluator.evaluate({
       objective: 'Introduce Jovi',
       options: risky,
-      knownPillars: PILLARS,
+      identity: APPROVED_JOVI_IDENTITY,
       mode: 'RULES_ONLY',
       trace: { purpose: 'evaluation', correlationId: 'c' },
     });

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { AgentRunner } from '../../agents/agent-runner.js';
 import type { ExecutiveAgent } from '../../agents/executive/executive-agent.js';
 import { ExecutiveDecisionSchema, type ExecutiveDecision } from '../../agents/executive/executive-schema.js';
-import { RoutingTier } from '../../types/enums.js';
+import { PrivacyRequirement, RoutingTier } from '../../types/enums.js';
 import type { Logger } from '../config/logger.js';
 import { errorMessage } from '../errors.js';
 import type { EventBus, JoviEvent } from '../events/event-bus.js';
@@ -13,6 +13,8 @@ import type { Task, TaskService } from '../jobs/task-service.js';
 export const GoalRequestSchema = z.object({
   goal: z.string().trim().min(5, 'goal must be at least 5 characters').max(2000),
   tier: RoutingTier.optional(),
+  /** LOCAL_ONLY: generation and evaluation stay on LM Studio (no cloud). */
+  privacy: PrivacyRequirement.optional(),
   constraints: z.array(z.string().max(300)).max(10).optional(),
   mode: z.enum(['sync', 'async']).default('sync'),
   createdBy: z.string().max(100).default('api'),
@@ -21,6 +23,8 @@ export type GoalRequest = z.input<typeof GoalRequestSchema>;
 
 export interface GoalExecutionResult {
   status: Task['status'];
+  /** True when any model output came from the simulation-only mock provider. */
+  simulated: boolean;
   taskId: string;
   jobId: string;
   correlationId: string;
@@ -90,6 +94,7 @@ export class JoviOrchestrator {
     const agentInput = {
       goal: input.goal,
       ...(input.tier ? { tier: input.tier } : {}),
+      ...(input.privacy ? { privacy: input.privacy } : {}),
       ...(input.constraints ? { constraints: input.constraints } : {}),
     };
     const task = this.deps.tasks.create({ type: 'EXECUTIVE_GOAL', goal: input.goal, input: agentInput, createdBy: input.createdBy }, scope);
@@ -128,8 +133,10 @@ export class JoviOrchestrator {
     const decision = decisionParse.success ? decisionParse.data : null;
     const events = this.deps.events.list({ correlationId: task.correlationId, limit: 1000 });
 
+    const modelsUsed = decision?.modelsUsed ?? [];
     return {
       status: task.status,
+      simulated: modelsUsed.some((m) => m.executionType === 'MOCK'),
       taskId: task.id,
       jobId: job.id,
       correlationId: task.correlationId,
@@ -145,7 +152,7 @@ export class JoviOrchestrator {
       contentDirection: decision?.contentDirection ?? null,
       nextActions: decision?.nextActions ?? [],
       evaluationSummary: decision?.evaluationSummary ?? null,
-      modelsUsed: decision?.modelsUsed ?? [],
+      modelsUsed,
       eventsGenerated: events.map((e) => ({ eventId: e.eventId, eventType: e.eventType, timestamp: e.timestamp, entityId: e.entityId, source: e.source })),
       attempts: job.attempts,
       durationMs: task.startedAt && task.completedAt ? Date.parse(task.completedAt) - Date.parse(task.createdAt) : null,

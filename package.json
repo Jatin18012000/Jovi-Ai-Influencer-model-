@@ -2,7 +2,7 @@
   "name": "jovi-creator-os",
   "version": "0.1.0",
   "private": true,
-  "description": "Jovi Creator OS — autonomous AI creator system. Phase 6: Jovi Core v0.1 (the core brain).",
+  "description": "Jovi Creator OS \u2014 autonomous AI creator system. Phase 6: Jovi Core v0.1 (the core brain).",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -12,18 +12,19 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:ollama": "JOVI_OLLAMA_INTEGRATION=1 vitest run tests/integration/ollama.integration.test.ts",
     "dev": "tsx watch apps/api/main.ts",
     "start": "node dist/apps/api/main.js",
     "start:dev": "tsx apps/api/main.ts",
     "jovi": "tsx apps/orchestrator/cli.ts",
-    "jovi:mock": "tsx apps/orchestrator/cli.ts --mock",
     "jovi:providers": "tsx apps/orchestrator/cli.ts --providers",
     "worker": "tsx apps/orchestrator/worker.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/database/scripts/migrate.ts",
     "db:seed": "tsx src/database/scripts/seed.ts",
-    "db:reset": "tsx src/database/scripts/reset.ts"
+    "db:reset": "tsx src/database/scripts/reset.ts",
+    "test:lmstudio": "vitest run tests/unit/lmstudio-provider.test.ts tests/integration/lmstudio-flow.e2e.test.ts tests/integration/lmstudio.real.test.ts",
+    "test:lmstudio:real": "JOVI_LMSTUDIO_REAL=1 vitest run tests/integration/lmstudio.real.test.ts",
+    "jovi:simulate": "tsx apps/orchestrator/cli.ts --simulate"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",

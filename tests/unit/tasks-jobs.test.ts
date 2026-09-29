@@ -126,14 +126,82 @@ describe('Job queue', () => {
     expect(await core.jobs.processNext()).toBeNull();
   });
 
-  it('recovers stale running jobs', async () => {
+  it('recovers stale RUNNING jobs so a worker resumes them', async () => {
     const { scope, task } = await setup(async () => 'done');
     const job = core.jobs.enqueue({ taskId: task.id, type: 'test.job', payload: {} }, scope);
     core.database.sqlite
-      .prepare(`UPDATE jobs SET status = 'RUNNING', locked_at = '2000-01-01T00:00:00.000Z' WHERE id = ?`)
+      .prepare(`UPDATE jobs SET status = 'RUNNING', attempts = 1, locked_at = '2000-01-01T00:00:00.000Z' WHERE id = ?`)
       .run(job.id);
-    expect(core.jobs.recoverStale(60_000)).toBe(1);
+    expect(await core.jobs.recoverStale(60_000)).toEqual({ requeued: 1, failed: 0, released: 0 });
     expect(core.jobs.get(job.id).status).toBe('RETRYING');
+    expect(core.events.list({ entityId: job.id, eventType: 'JOB_RECOVERED' })).toHaveLength(1);
     expect((await core.jobs.processNext())?.status).toBe('COMPLETED');
+  });
+
+  it('releases orphaned reserved QUEUED/RETRYING jobs (synchronous owner died)', async () => {
+    const { scope, task } = await setup(async () => 'done');
+    const queued = core.jobs.enqueue({ taskId: task.id, type: 'test.job', payload: {}, reserve: true }, scope);
+    const retrying = core.jobs.enqueue({ taskId: task.id, type: 'test.job', payload: {}, reserve: true }, scope);
+    const old = '2000-01-01T00:00:00.000Z';
+    core.database.sqlite.prepare(`UPDATE jobs SET locked_at = ? WHERE id = ?`).run(old, queued.id);
+    core.database.sqlite.prepare(`UPDATE jobs SET status = 'RETRYING', attempts = 1, locked_at = ? WHERE id = ?`).run(old, retrying.id);
+
+    expect(await core.worker.drain()).toBe(0); // still reserved: invisible to workers
+    expect(await core.jobs.recoverStale(60_000)).toEqual({ requeued: 0, failed: 0, released: 2 });
+    expect(await core.worker.drain()).toBe(2);
+    expect(core.jobs.get(queued.id).status).toBe('COMPLETED');
+    expect(core.jobs.get(retrying.id).status).toBe('COMPLETED');
+  });
+
+  it('fails a stale job with no attempts left and runs its final-failure hook', async () => {
+    const onFinalFailure = vi.fn();
+    const { scope, task } = await setup(async () => 'done', onFinalFailure);
+    const job = core.jobs.enqueue({ taskId: task.id, type: 'test.job', payload: {}, maxAttempts: 2 }, scope);
+    core.database.sqlite
+      .prepare(`UPDATE jobs SET status = 'RUNNING', attempts = 2, locked_at = '2000-01-01T00:00:00.000Z' WHERE id = ?`)
+      .run(job.id);
+    expect(await core.jobs.recoverStale(60_000)).toEqual({ requeued: 0, failed: 1, released: 0 });
+    expect(core.jobs.get(job.id)).toMatchObject({ status: 'FAILED', lastError: { code: 'STALE_JOB' } });
+    expect(onFinalFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it('never recovers a live job: the heartbeat keeps its lock fresh', async () => {
+    core = await createTestCore({ env: { JOVI_JOB_STALE_MS: '300', JOVI_JOB_HEARTBEAT_MS: '50' } });
+    let release: () => void = () => {};
+    core.jobs.registerHandler('slow.job', { execute: () => new Promise((resolve) => (release = () => resolve('done'))) });
+    const scope = core.events.scope('cor_live');
+    const task = core.tasks.create({ type: 'TEST', goal: 'x', createdBy: 'test' }, scope);
+    const job = core.jobs.enqueue({ taskId: task.id, type: 'slow.job', payload: {}, reserve: true }, scope);
+    const running = core.jobs.run(job.id);
+    await new Promise((r) => setTimeout(r, 600)); // twice the stale threshold
+    expect(await core.jobs.recoverStale(300)).toEqual({ requeued: 0, failed: 0, released: 0 });
+    release();
+    expect((await running).status).toBe('COMPLETED');
+  });
+
+  it('recovers orphaned jobs at startup and completes the task end to end', async () => {
+    const { MockProvider } = await import('../../src/models/providers/mock-provider.js');
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { loadConfig } = await import('../../src/core/config/config.js');
+    const { createJoviCore } = await import('../../src/core/bootstrap.js');
+    const dbPath = join(mkdtempSync(join(tmpdir(), 'jovi-')), 'jovi.db');
+    const config = loadConfig({ DATABASE_URL: dbPath, JOVI_LOG_LEVEL: 'silent', LM_STUDIO_ENABLED: 'false', JOVI_JOB_STALE_MS: '1000' });
+
+    // Process 1 accepts a synchronous goal, then "dies" before running it.
+    const first = await createJoviCore({ config, providers: [new MockProvider()] });
+    const scope = first.events.scope('cor_crash');
+    const task = first.tasks.create({ type: 'EXECUTIVE_GOAL', goal: 'Create an Instagram Reel concept', createdBy: 'test' }, scope);
+    const job = first.jobs.enqueue({ taskId: task.id, type: 'executive.goal', payload: { goal: 'Create an Instagram Reel concept' }, reserve: true }, scope);
+    first.database.sqlite.prepare(`UPDATE jobs SET locked_at = '2000-01-01T00:00:00.000Z' WHERE id = ?`).run(job.id);
+    await first.close();
+
+    // Process 2 starts: recovery releases the job and a worker finishes it.
+    const second = await createJoviCore({ config, providers: [new MockProvider()], sleep: async () => {} });
+    expect(second.jobRecovery.released).toBe(1);
+    expect(await second.worker.drain()).toBe(1);
+    expect(second.tasks.get(task.id).status).toBe('COMPLETED');
+    await second.close();
   });
 });

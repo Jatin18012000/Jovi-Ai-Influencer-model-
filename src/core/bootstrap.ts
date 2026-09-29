@@ -1,5 +1,6 @@
 import { AgentRegistry } from '../agents/agent-registry.js';
 import { AgentRunner } from '../agents/agent-runner.js';
+import type { ToolServices } from '../agents/toolkit.js';
 import { ExecutiveAgent } from '../agents/executive/executive-agent.js';
 import { PLANNED_AGENTS } from '../agents/planned-agents.js';
 import { openDatabase, runMigrations, type DatabaseHandle } from '../database/client.js';
@@ -40,6 +41,7 @@ export interface JoviCore {
   logger: Logger;
   database: DatabaseHandle;
   seedReport: SeedReport | null;
+  jobRecovery: { requeued: number; failed: number; released: number };
   events: EventBus;
   tasks: TaskService;
   jobs: JobQueue;
@@ -80,9 +82,10 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   const jobs = new JobQueue(db, sqlite, events, logger.child({ component: 'jobs' }), {
     defaultMaxAttempts: config.jobs.maxAttempts,
     backoffMs: config.jobs.backoffMs,
+    heartbeatMs: config.jobs.heartbeatMs,
     ...(options.sleep ? { sleep: options.sleep } : {}),
   });
-  const worker = new JobWorker(jobs, logger.child({ component: 'worker' }), config.jobs.workerPollMs);
+  const worker = new JobWorker(jobs, logger.child({ component: 'worker' }), config.jobs.workerPollMs, config.jobs.staleMs);
 
   const identity = new IdentityService(db);
   const strategy = new StrategyService(db);
@@ -97,19 +100,37 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
 
   const router = new ModelRouter(providers, db, logger.child({ component: 'router' }), prompts, {
     cloudPreference: config.providers.cloudPreference,
-    timeoutMs: config.providers.timeoutMs,
+    allowCloudFallback: config.providers.allowCloudFallback,
   });
   const evaluator = new Evaluator(router, prompts, db, logger.child({ component: 'evaluator' }));
   const contextEngine = new ContextEngine({ identity, strategy, memory, knowledge, semantic, decisions, providers });
 
-  const executive = new ExecutiveAgent({ contextEngine, router, evaluator, decisions, memory, semantic, prompts });
+  // Agents receive no services: only the runner holds them, behind the ToolKit.
+  const executive = new ExecutiveAgent(prompts);
   const agents = new AgentRegistry();
   agents.register(executive);
   for (const def of PLANNED_AGENTS) agents.registerPlanned(def);
   agents.syncToDatabase(db);
 
-  const runner = new AgentRunner(db, logger.child({ component: 'agents' }), config.permissions.maxLevel);
+  const toolServices: ToolServices = {
+    identity,
+    strategy,
+    memory,
+    knowledge,
+    semantic,
+    decisions,
+    router,
+    evaluator,
+    contextEngine,
+    agentDirectory: () => agents.list().map(({ definition, status }) => ({ name: definition.name, permissionLevel: definition.permissionLevel, status })),
+  };
+  const runner = new AgentRunner(db, logger.child({ component: 'agents' }), config.permissions.maxLevel, toolServices);
   const orchestrator = new JoviOrchestrator({ tasks, jobs, events, runner, executive, logger: logger.child({ component: 'orchestrator' }) });
+
+  // Crash recovery on every start (after job handlers are registered).
+  const jobRecovery = await jobs.recoverStale(config.jobs.staleMs);
+  for (const warning of config.warnings) logger.warn({ warning }, 'configuration warning');
+  if (providers.isSimulation()) logger.warn('SIMULATION MODE: only the deterministic mock provider is registered; results are not real model output');
 
   // Warm the (lexical) semantic index with recent selected concepts.
   for (const d of decisions.recent(50)) {
@@ -124,6 +145,7 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
     logger,
     database,
     seedReport,
+    jobRecovery,
     events,
     tasks,
     jobs,

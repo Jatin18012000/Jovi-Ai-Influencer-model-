@@ -67,7 +67,7 @@ describe('End-to-end: GOAL → EXECUTIVE → CONTEXT → ROUTER → MODEL → DE
     expect(core.jobs.get(result.jobId)).toMatchObject({ status: 'COMPLETED', attempts: 1 });
 
     const decision = core.decisions.get(result.decisionId!);
-    expect(decision).toMatchObject({ status: 'SELECTED', decisionType: 'CONTENT_DIRECTION', decisionAgent: 'executive@0.1.0', taskId: result.taskId });
+    expect(decision).toMatchObject({ status: 'SELECTED', decisionType: 'CONTENT_DIRECTION', decisionAgent: 'executive@0.2.0', taskId: result.taskId });
     expect(decision.selectedAction).toMatchObject({ id: 'A', title: 'Two Truths and a Glitch' });
     expect(decision.evaluation).toMatchObject({ method: 'MODEL_AND_RULES' });
     expect((decision.modelsUsed as unknown[]).length).toBe(2);

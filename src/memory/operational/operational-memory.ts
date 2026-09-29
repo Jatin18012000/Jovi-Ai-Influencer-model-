@@ -1,7 +1,7 @@
 import { and, desc, eq, gt, isNull, lte, or, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import type { CorrelationScope, EventBus } from '../../core/events/event-bus.js';
-import { NotFoundError } from '../../core/errors.js';
+import { ConflictError, NotFoundError, ValidationError } from '../../core/errors.js';
 import { newId, nowIso } from '../../core/ids.js';
 import type { JoviDatabase } from '../../database/client.js';
 import { memoryItems } from '../../database/schema.js';
@@ -20,6 +20,34 @@ export const MemoryInputSchema = z.object({
 });
 
 export type MemoryInput = z.input<typeof MemoryInputSchema>;
+
+/**
+ * Memory-poisoning defence. Memory arriving from outside the system (the API)
+ * is untrusted: it may only use low-authority types, is always tagged with
+ * source `api`, has capped importance/confidence, and can never overwrite
+ * memory written by the seed or by agents.
+ */
+export const EXTERNAL_MEMORY_SOURCE = 'api';
+export const EXTERNAL_WRITABLE_TYPES = ['FACT', 'PREFERENCE', 'LEARNING', 'AUDIENCE', 'CONTENT', 'EXPERIMENT', 'TEMPORARY'] as const;
+export const EXTERNAL_LIMITS = { maxImportance: 0.7, maxConfidence: 0.8, maxValueBytes: 4096 } as const;
+
+export const ExternalMemoryInputSchema = z.object({
+  type: z.enum(EXTERNAL_WRITABLE_TYPES, {
+    error: `type must be one of ${EXTERNAL_WRITABLE_TYPES.join(', ')} (IDENTITY, STRATEGY and DECISION cannot be written externally)`,
+  }),
+  key: z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,199}$/i, 'key may contain letters, digits, . _ : - (max 200)'),
+  value: z.unknown().refine((v) => v !== undefined, 'value is required'),
+  importance: z.number().min(0).max(1).default(0.5),
+  confidence: z.number().min(0).max(1).default(0.6),
+  tags: z.array(z.string().max(50)).max(20).default([]),
+  expiresAt: z.iso.datetime().nullable().optional(),
+});
+export type ExternalMemoryInput = z.input<typeof ExternalMemoryInputSchema>;
+
+/** Trusted = written by the seed or by an agent through the ToolKit. Everything else is untrusted data. */
+export function isTrustedSource(source: string): boolean {
+  return source.startsWith('seed:') || source.startsWith('agent:');
+}
 
 export interface MemoryItem {
   id: string;
@@ -106,6 +134,28 @@ export class OperationalMemory {
     const item = this.get(row.id);
     this.emit(scope, 'MEMORY_CREATED', item);
     return { item, created: true };
+  }
+
+  /** Untrusted write path (API). See EXTERNAL_* policy above. */
+  writeExternal(input: ExternalMemoryInput, scope?: CorrelationScope): { item: MemoryItem; created: boolean } {
+    const data = ExternalMemoryInputSchema.parse(input);
+    const bytes = Buffer.byteLength(JSON.stringify(data.value) ?? '', 'utf8');
+    if (bytes > EXTERNAL_LIMITS.maxValueBytes) {
+      throw new ValidationError(`memory value is ${bytes} bytes; external limit is ${EXTERNAL_LIMITS.maxValueBytes}`);
+    }
+    const existing = this.findByKey(data.type, data.key);
+    if (existing && existing.source !== EXTERNAL_MEMORY_SOURCE) {
+      throw new ConflictError(`memory ${data.type}:${data.key} is owned by ${existing.source} and cannot be overwritten externally`);
+    }
+    return this.upsert(
+      {
+        ...data,
+        source: EXTERNAL_MEMORY_SOURCE,
+        importance: Math.min(data.importance, EXTERNAL_LIMITS.maxImportance),
+        confidence: Math.min(data.confidence, EXTERNAL_LIMITS.maxConfidence),
+      },
+      scope,
+    );
   }
 
   get(id: string): MemoryItem {

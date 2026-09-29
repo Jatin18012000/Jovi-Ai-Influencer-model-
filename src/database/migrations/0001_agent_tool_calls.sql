@@ -1,0 +1,1 @@
+ALTER TABLE `agent_runs` ADD `tool_calls` text;

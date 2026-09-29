@@ -5,7 +5,9 @@ import { newId } from '../../core/ids.js';
 import type { PromptLibrary } from '../../core/prompts/prompt-library.js';
 import type { JoviDatabase } from '../../database/client.js';
 import { evaluations } from '../../database/schema.js';
-import type { RoutingTier } from '../../types/enums.js';
+import type { JoviIdentity } from '../../core/identity/identity-schema.js';
+import { identityPromptVariables } from '../../core/identity/identity-prompt.js';
+import type { PrivacyRequirement, RoutingTier } from '../../types/enums.js';
 import { parseModelJson } from '../json-output.js';
 import type { ModelRouter, RunTrace } from '../router/model-router.js';
 import { isBlocked, runRuleChecks, type EvaluableOption, type RuleCheck } from './rule-checks.js';
@@ -78,7 +80,10 @@ export interface EvaluationResult {
 export interface EvaluationRequest {
   objective: string;
   options: EvaluableOption[];
-  knownPillars: readonly string[];
+  /** Active identity version: drives pillar checks and the evaluator's creator brief. */
+  identity: JoviIdentity;
+  /** Routing privacy for the evaluator model (LOCAL_ONLY keeps evaluation on LM Studio). */
+  privacy?: PrivacyRequirement;
   /** Models that generated the options; the evaluator will avoid them. */
   generatorModels?: string[];
   tier?: RoutingTier;
@@ -103,7 +108,14 @@ export class Evaluator {
 
   async evaluate(request: EvaluationRequest): Promise<EvaluationResult> {
     const generatorModels = request.generatorModels ?? [];
-    const ruleResults = new Map(request.options.map((o) => [o.id, runRuleChecks(o, request.knownPillars)]));
+    const knownPillars = request.identity.contentCategories;
+    const routing = {
+      taskType: 'evaluation.options',
+      complexity: 'NORMAL' as const,
+      excludeModels: generatorModels,
+      ...(request.privacy ? { privacy: request.privacy } : {}),
+    };
+    const ruleResults = new Map(request.options.map((o) => [o.id, runRuleChecks(o, knownPillars)]));
 
     let modelEval: z.infer<typeof ModelEvaluationSchema> | null = null;
     let modelUsage: EvaluationResult['modelUsage'] = null;
@@ -115,23 +127,23 @@ export class Evaluator {
     } else if (request.tier === 'LOW') {
       competitionReason = 'LOW tier: model evaluation skipped to save cost; deterministic rules applied';
     } else {
-      const plan = await this.router.plan({ taskType: 'evaluation.options', complexity: 'NORMAL', excludeModels: generatorModels });
+      const plan = await this.router.plan(routing);
       if (plan.candidates.length === 0) {
         competitionReason = 'model competition unavailable: no second model available (evaluator must differ from generator)';
       } else {
         try {
           const prompt = this.prompts.render('evaluation/evaluate-options', {
             objective: request.objective,
-            known_pillars: request.knownPillars.join(', '),
+            known_pillars: knownPillars.join(', '),
             options_json: JSON.stringify(request.options, null, 2),
           });
           const routed = await this.router.generate(
             {
               task: { type: 'evaluation.options', description: 'Independent evaluation of content options' },
-              context: { system: this.prompts.load('evaluation/evaluator-system'), prompt },
+              context: { system: this.prompts.render('evaluation/evaluator-system', identityPromptVariables(request.identity)), prompt },
               requirements: { json: true, temperature: 0.2, maxOutputTokens: 2000 },
             },
-            { taskType: 'evaluation.options', complexity: 'NORMAL', excludeModels: generatorModels },
+            routing,
             { ...request.trace, purpose: 'evaluation' },
             (text) => parseModelJson(ModelEvaluationSchema, text),
           );

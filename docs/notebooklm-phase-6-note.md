@@ -1,36 +1,28 @@
 # NotebookLM Project Note — Jovi Creator OS, Phase 6 (Jovi Core v0.1)
 
-**Date:** 2026-09-29
-**Status:** Phase 6 complete. The core brain works end to end. It was verified with the deterministic mock provider, because no Ollama instance or cloud API key was available in the build environment.
+**Last revised:** 2026-09-29 — hardening pass + LM Studio migration.
+**Status:** Phase 6 implementation complete and hardened. **Not yet verified against a real model**: the build environment could not reach the owner's LM Studio (it runs on the owner's MacBook, and no model is loaded yet). All automated verification used a fake LM Studio HTTP server or test doubles.
 
 ## What Jovi is
-Jovi (Jovira), 25, from London, UK, with Indian, Russian and Western heritage. She is an openly AI global lifestyle virtual creator and must never claim to be human. Her community is "Jovi's Crew". Golden rule: "Jovi should never sound like an AI writing an Instagram caption." Core pillars: Travel & Exploration, Fashion & Beauty, Entertainment & Personality. Content philosophy: Experience → Story → Personality → Community.
+Jovi (Jovira), 25, from London, UK, with Indian, Russian and Western heritage — an openly AI global lifestyle virtual creator who must never claim to be human. Community: "Jovi's Crew". Golden rule: "Jovi should never sound like an AI writing an Instagram caption." Core pillars: Travel & Exploration, Fashion & Beauty, Entertainment & Personality.
 
 ## What Phase 6 built
-A TypeScript modular monolith that turns a goal into an auditable, structured creative decision:
+A TypeScript modular monolith (Fastify, SQLite + Drizzle, Zod, Vitest):
 
-GOAL → Executive Agent → Context Engine → Model Router → Model → Zod-validated proposal → Evaluator (a second model plus rule checks) → selection → persisted Decision and Memory → events → result (API and CLI).
+Goal → Task → Job → Context → Executive Agent → Model Router → LM Studio or cloud model → Zod-validated output → Evaluation → Decision → Memory → Events → completed Job → API/CLI result.
 
-- **Stack:** Node.js 22, TypeScript (strict), Fastify, SQLite + Drizzle (13 tables, migrations, seed), Zod, Vitest, pino.
-- **Executive Agent:** permission LEVEL_2_MODIFY. Produces an objective, interpretation, priorities, content direction, 2–5 options, the selected option, a rationale summary, a confidence score and next actions. External actions such as publishing come back as REQUIRES_APPROVAL.
-- **Model Router:** tiers are LOW (local first), NORMAL (cloud first), HIGH (cloud, with local as a flagged degraded fallback) and STRATEGIC (cloud plus an independent evaluator). There is a privacy LOCAL_ONLY mode. The router repairs invalid JSON once, then falls back to the next provider. Every attempt is logged in `model_runs`.
-- **Providers:** Ollama (detects installed models and never pulls any), Anthropic, OpenAI, Gemini, and a mock provider for offline runs. A provider without credentials reports itself as unavailable instead of crashing.
-- **Evaluator:** scores quality, brandFit, objectiveFit, originality, audienceFit, risk and cost on a 1–5 scale, labeled as model judgements. Rule checks cover AI transparency, privacy, platform safety, clichés, pillar fit and personality. An option that fails a hard rule cannot be selected.
-- **Memory:** operational memory in SQLite (10 types, with importance, confidence, source and expiry), knowledge in Markdown files, and a semantic interface. The semantic layer is currently a keyword baseline, not vector search.
-- **Events:** a persisted bus. Each event carries a correlationId and a causationId chain.
-- **Tasks and jobs:** SQLite-backed, with retry and backoff, crash recovery and async worker mode.
-- **Permissions:** Levels 0–5. The deployment ceiling is LEVEL_3. The system has no shell, filesystem or credential tools.
+- **Local model runtime:** LM Studio only (`LMStudioProvider`, OpenAI-compatible local API at `http://localhost:1234/v1`). It discovers which models are loaded and reports itself unavailable — with the fix — when the server is off or no model is loaded. Ollama was removed.
+- **Cloud:** Anthropic, OpenAI, Gemini; each reports unavailable without a key.
+- **Routing:** LOW/local tasks → LM Studio (cloud fallback configurable); NORMAL/HIGH/STRATEGIC → cloud, LM Studio as fallback; `LOCAL_ONLY` → LM Studio only. Fallback is logged per attempt.
+- **Mock:** simulation/test only. It can never be registered next to real providers, and simulated results are flagged.
+- **Security:** permissions enforced through a per-run ToolKit (every tool call audited); memory from the API is untrusted, restricted and rendered as escaped data; prompts take identity from the active database version; external next actions always need human approval; the API refuses unauthenticated network exposure and rate-limits goals.
+- **Reliability:** jobs heartbeat while running; abandoned jobs are recovered on restart. `.env` is loaded automatically.
 
-## Verification
-The TypeScript check passes and the build succeeds. The suite has 100 tests, all passing without network access or paid APIs; 2 Ollama integration tests are skipped because no Ollama was running. The API was exercised over real HTTP, and the CLI ran against a fresh database.
+## Verification (this environment)
+Typecheck and build pass. 139 automated tests pass (2 real-LM-Studio tests skipped by design). The compiled API and CLI completed the full flow against a fake LM Studio server process, and degraded gracefully (503, clear LM Studio status) with nothing running.
 
-## Known limitations
-- Semantic memory is lexical, not vector.
-- Model competition only reports whether a second model is available.
-- Goal tiering uses a keyword heuristic.
-- Pricing figures are estimates.
-- There is no dashboard, publishing, media generation, analytics or n8n integration yet.
-- The Docker image was not built in this environment.
+## Next step to finish Phase 6
+On the MacBook: load a model in LM Studio, start its server, then run `npm run test:lmstudio:real` and `npm run jovi -- --local-only "<goal>"`, and record the result.
 
 ## Next phase candidates
-Specialist agents (script, visual, QA), human approval queue, vector semantic memory, n8n integration for external actions, analytics → learning → strategy versioning loop.
+Script, visual and QA agents; human approval queue; vector semantic memory; n8n for external actions; analytics → learning → strategy loop.

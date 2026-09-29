@@ -4,7 +4,7 @@ Adapters to external systems live here, one folder per system. Agents never call
 
 | Folder | Status (Phase 6) | Purpose |
 |---|---|---|
-| `ollama/` | **Implemented** | HTTP client for the local Ollama API (model detection, chat). Used by `OllamaProvider`. |
+| `lmstudio/` | **Implemented** | Client for LM Studio's local server — Jovi's only local-model runtime. Model discovery via native `/api/v1/models` (≥ 0.4), `/api/v0/models`, or OpenAI-compatible `/v1/models`; generation via `/v1/chat/completions`. Used by `LMStudioProvider`. Never downloads or loads models. |
 | `n8n/` | Planned | Outbound webhooks to n8n for external automation. n8n is *not* the brain: it executes, Jovi Core decides. Requires `LEVEL_4_EXTERNAL_ACTION`. |
 | `comfyui/` | Planned | Image/video generation workflows for the Visual agent. |
 | `flow/` | Planned | Video generation (Flow) for the Visual agent. |

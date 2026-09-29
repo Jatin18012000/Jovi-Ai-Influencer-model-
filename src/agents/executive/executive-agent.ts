@@ -1,16 +1,15 @@
 import { InvalidModelOutputError } from '../../core/errors.js';
-import type { DecisionService } from '../../core/decisions/decision-service.js';
+import { identityPromptVariables } from '../../core/identity/identity-prompt.js';
 import { ContextEngine, type JoviContext } from '../../core/orchestrator/context-engine.js';
-import { PermissionGuard, atLeast } from '../../core/permissions/permissions.js';
+import { atLeast, requiredLevelForAction } from '../../core/permissions/permissions.js';
 import type { PromptLibrary } from '../../core/prompts/prompt-library.js';
-import type { OperationalMemory } from '../../memory/operational/operational-memory.js';
-import type { SemanticMemory } from '../../memory/semantic/semantic-memory.js';
 import { slugify } from '../../memory/text.js';
-import { compositeScore, type EvaluationResult, type Evaluator } from '../../models/evaluator/evaluator.js';
+import { compositeScore, type EvaluationResult } from '../../models/evaluator/evaluator.js';
 import { parseModelJson } from '../../models/json-output.js';
-import type { ModelRouter, RoutedGeneration } from '../../models/router/model-router.js';
+import type { RoutedGeneration } from '../../models/router/model-router.js';
 import type { RoutingTier } from '../../types/enums.js';
 import type { Agent, AgentDefinition, AgentRunContext } from '../agent.js';
+import type { ToolKit } from '../toolkit.js';
 import {
   EXECUTIVE_PROPOSAL_SHAPE,
   ExecutiveDecisionSchema,
@@ -26,7 +25,7 @@ import {
 
 export const EXECUTIVE_AGENT_DEFINITION: AgentDefinition = {
   name: 'executive',
-  version: '0.1.0',
+  version: '0.2.0',
   description:
     "Jovi's top-level decision maker: interprets goals, weighs options against identity and strategy, selects an action and delegates next steps.",
   capabilities: ['goal-interpretation', 'content-direction', 'option-generation', 'option-selection', 'delegation-planning'],
@@ -36,6 +35,7 @@ export const EXECUTIVE_AGENT_DEFINITION: AgentDefinition = {
     'memory.read',
     'knowledge.read',
     'decision.read',
+    'agent.read',
     'model.generate',
     'model.evaluate',
     'decision.write',
@@ -52,28 +52,20 @@ export const EXECUTIVE_AGENT_DEFINITION: AgentDefinition = {
 const EVALUATOR_OVERRIDE_MARGIN = 2;
 const ALTERNATIVES_TTL_DAYS = 14;
 
-export interface ExecutiveAgentDeps {
-  contextEngine: ContextEngine;
-  router: ModelRouter;
-  evaluator: Evaluator;
-  decisions: DecisionService;
-  memory: OperationalMemory;
-  semantic: SemanticMemory;
-  prompts: PromptLibrary;
-}
-
+/**
+ * The Executive Agent holds no services. Everything it reads or writes goes
+ * through `ctx.tools`, which enforces its permission level on every call.
+ * Its only constructor dependency is the read-only prompt library.
+ */
 export class ExecutiveAgent implements Agent<ExecutiveInput, ExecutiveDecision, JoviContext> {
   readonly definition = EXECUTIVE_AGENT_DEFINITION;
   readonly inputSchema = ExecutiveInputSchema;
   readonly outputSchema = ExecutiveDecisionSchema;
 
-  constructor(private readonly deps: ExecutiveAgentDeps) {}
+  constructor(private readonly prompts: PromptLibrary) {}
 
   async loadContext(input: ExecutiveInput, ctx: AgentRunContext): Promise<JoviContext> {
-    for (const tool of ['identity.read', 'strategy.read', 'memory.read', 'knowledge.read', 'decision.read'] as const) {
-      ctx.permissions.assert(tool);
-    }
-    return this.deps.contextEngine.build({
+    return ctx.tools.context.build({
       goal: input.goal,
       task: { id: ctx.taskId, type: 'EXECUTIVE_GOAL' },
       agent: { name: this.definition.name, allowedTools: this.definition.allowedTools, permissionLevel: ctx.permissions.effectiveLevel },
@@ -86,19 +78,23 @@ export class ExecutiveAgent implements Agent<ExecutiveInput, ExecutiveDecision, 
   }
 
   async execute(input: ExecutiveInput, context: JoviContext, ctx: AgentRunContext): Promise<ExecutiveDecision> {
+    const { tools } = ctx;
     const tier = input.tier ?? classifyGoal(input.goal);
+    const privacy = input.privacy ?? this.definition.modelRequirements.privacy;
+    const identityVars = identityPromptVariables(context.identity.profile);
 
     // 1. Generate a structured proposal via the Model Router.
-    ctx.permissions.assert('model.generate');
-    const routed = await this.deps.router.generate(
+    const routed = await tools.models.generate(
       {
         task: { type: 'executive.proposal', description: 'Executive content decision proposal' },
         context: {
-          system: this.deps.prompts.load('system/jovi-executive-system'),
-          prompt: this.deps.prompts.render('executive/executive-decision', {
+          // Identity facts come from the ACTIVE identity version, never from static prompt text.
+          system: this.prompts.render('system/jovi-executive-system', identityVars),
+          prompt: this.prompts.render('executive/executive-decision', {
+            creator_name: identityVars.creator_name ?? context.identity.profile.creatorName,
             goal: input.goal,
             tier,
-            context: this.deps.contextEngine.render(context),
+            context: tools.context.render(context),
             output_shape: EXECUTIVE_PROPOSAL_SHAPE,
           }),
         },
@@ -108,47 +104,44 @@ export class ExecutiveAgent implements Agent<ExecutiveInput, ExecutiveDecision, 
         taskType: 'executive.proposal',
         complexity: tier,
         quality: tier,
-        privacy: this.definition.modelRequirements.privacy,
+        privacy,
         costClass: tier === 'LOW' ? 'LOW' : 'MEDIUM',
         latency: this.definition.modelRequirements.latency,
       },
-      ctx.trace('executive.proposal'),
+      'executive.proposal',
       (text) => parseModelJson(ExecutiveProposalSchema, text),
     );
     const proposal = routed.parsed;
     const generatorUsage = toModelUsage('executive.proposal', routed);
 
     // 2. Persist the proposal as a decision (PROPOSED).
-    ctx.permissions.assert('decision.write');
-    const decision = this.deps.decisions.propose(
-      {
-        taskId: ctx.taskId,
-        decisionType: 'CONTENT_DIRECTION',
-        objective: proposal.objective,
-        context: { goal: input.goal, tier, ...ContextEngine.summarize(context) },
-        options: proposal.options,
-        reasoningSummary: proposal.rationaleSummary,
-        confidence: proposal.confidence,
-        decisionAgent: `${this.definition.name}@${this.definition.version}`,
-        modelsUsed: [generatorUsage],
-      },
-      ctx.scope,
-    );
+    const decision = tools.decisions.propose({
+      taskId: ctx.taskId,
+      decisionType: 'CONTENT_DIRECTION',
+      objective: proposal.objective,
+      context: { goal: input.goal, tier, privacy, ...ContextEngine.summarize(context) },
+      options: proposal.options,
+      reasoningSummary: proposal.rationaleSummary,
+      confidence: proposal.confidence,
+      decisionAgent: `${this.definition.name}@${this.definition.version}`,
+      modelsUsed: [generatorUsage],
+    });
 
     // 3. Evaluate the options (independent model where available + deterministic rules).
-    ctx.permissions.assert('model.evaluate');
-    const evaluation = await this.deps.evaluator.evaluate({
+    const evaluation = await tools.evaluation.evaluate({
       objective: proposal.objective,
       options: proposal.options,
-      knownPillars: context.identity.profile.contentCategories,
+      identity: context.identity.profile,
       generatorModels: [`${routed.result.provider}:${routed.result.model}`],
       tier,
+      privacy,
       decisionId: decision.id,
-      trace: ctx.trace('evaluation'),
     });
     const modelsUsed: ModelUsage[] = [generatorUsage];
-    if (evaluation.modelUsage) modelsUsed.push({ purpose: 'evaluation', ...evaluation.modelUsage });
-    this.deps.decisions.recordEvaluation(decision.id, evaluation, modelsUsed, ctx.scope, {
+    if (evaluation.modelUsage) {
+      modelsUsed.push({ purpose: 'evaluation', executionType: executionTypeOf(evaluation.modelUsage.executionCostType), ...evaluation.modelUsage });
+    }
+    tools.decisions.recordEvaluation(decision.id, evaluation, modelsUsed, {
       evaluationId: evaluation.evaluationId,
       method: evaluation.method,
       modelCompetition: evaluation.modelCompetition.available,
@@ -157,16 +150,15 @@ export class ExecutiveAgent implements Agent<ExecutiveInput, ExecutiveDecision, 
 
     // 4. Select the final action.
     const selection = selectOption(proposal, evaluation);
-    const nextActions = this.classifyNextActions(proposal, ctx.permissions);
+    const nextActions = classifyNextActions(proposal, tools);
     const rationaleSummary =
       selection.method === 'PROPOSER_RECOMMENDATION' || selection.method === 'EVALUATOR_AGREEMENT'
         ? proposal.rationaleSummary
         : `${selection.note} Original proposal rationale: ${proposal.rationaleSummary}`;
 
-    this.deps.decisions.select(
+    tools.decisions.select(
       decision.id,
       { selectedAction: selection.option, reasoningSummary: rationaleSummary, confidence: selection.confidence, nextActions, modelsUsed },
-      ctx.scope,
       { selectedOptionId: selection.option.id, title: selection.option.title, method: selection.method, confidence: selection.confidence },
     );
 
@@ -193,91 +185,92 @@ export class ExecutiveAgent implements Agent<ExecutiveInput, ExecutiveDecision, 
   }
 
   /** Persists memory derived from the decision (never the model's raw reasoning). */
-  persist(output: ExecutiveDecision, _input: ExecutiveInput, ctx: AgentRunContext): void {
-    ctx.permissions.assert('memory.write');
+  async persist(output: ExecutiveDecision, _input: ExecutiveInput, ctx: AgentRunContext): Promise<void> {
+    const { tools } = ctx;
     const selected = output.selectedOption;
-    const source = `agent:${this.definition.name}`;
     const tags = ['executive', selected.format.toLowerCase(), ...slugify(selected.pillar).split('-')].filter(Boolean);
 
-    this.deps.memory.upsert(
-      {
-        type: 'DECISION',
-        key: `decision.${output.decisionId}`,
-        value: {
-          objective: output.objective,
-          selected: { id: selected.id, title: selected.title, format: selected.format, pillar: selected.pillar, hook: selected.hook },
-          selectionMethod: output.selection.method,
-          confidence: output.confidence,
-          taskId: ctx.taskId,
-        },
-        importance: 0.5,
+    tools.memory.write({
+      type: 'DECISION',
+      key: `decision.${output.decisionId}`,
+      value: {
+        objective: output.objective,
+        selected: { id: selected.id, title: selected.title, format: selected.format, pillar: selected.pillar, hook: selected.hook },
+        selectionMethod: output.selection.method,
         confidence: output.confidence,
-        source,
-        tags: ['decision', ...tags],
+        taskId: ctx.taskId,
       },
-      ctx.scope,
-    );
+      importance: 0.5,
+      confidence: output.confidence,
+      tags: ['decision', ...tags],
+    });
 
-    this.deps.memory.upsert(
-      {
-        type: 'CONTENT',
-        key: `concept.${slugify(selected.title)}`,
-        value: {
-          title: selected.title,
-          format: selected.format,
-          pillar: selected.pillar,
-          hook: selected.hook,
-          concept: selected.concept,
-          status: 'SELECTED_NOT_PRODUCED',
-          decisionId: output.decisionId,
-        },
-        importance: 0.6,
-        confidence: output.confidence,
-        source,
-        tags: ['concept', ...tags],
+    tools.memory.write({
+      type: 'CONTENT',
+      key: `concept.${slugify(selected.title)}`,
+      value: {
+        title: selected.title,
+        format: selected.format,
+        pillar: selected.pillar,
+        hook: selected.hook,
+        concept: selected.concept,
+        status: 'SELECTED_NOT_PRODUCED',
+        decisionId: output.decisionId,
       },
-      ctx.scope,
-    );
+      importance: 0.6,
+      confidence: output.confidence,
+      tags: ['concept', ...tags],
+    });
 
     const alternatives = output.options.filter((o) => o.id !== selected.id);
     if (alternatives.length) {
-      this.deps.memory.upsert(
-        {
-          type: 'TEMPORARY',
-          key: `alternatives.${output.decisionId}`,
-          value: { decisionId: output.decisionId, alternatives: alternatives.map((o) => ({ id: o.id, title: o.title, pillar: o.pillar, format: o.format })) },
-          importance: 0.3,
-          confidence: output.confidence,
-          source,
-          tags: ['alternatives', 'backlog'],
-          expiresAt: new Date(Date.now() + ALTERNATIVES_TTL_DAYS * 86_400_000).toISOString(),
-        },
-        ctx.scope,
-      );
+      tools.memory.write({
+        type: 'TEMPORARY',
+        key: `alternatives.${output.decisionId}`,
+        value: { decisionId: output.decisionId, alternatives: alternatives.map((o) => ({ id: o.id, title: o.title, pillar: o.pillar, format: o.format })) },
+        importance: 0.3,
+        confidence: output.confidence,
+        tags: ['alternatives', 'backlog'],
+        expiresAt: new Date(Date.now() + ALTERNATIVES_TTL_DAYS * 86_400_000).toISOString(),
+      });
     }
 
-    void this.deps.semantic.index({
+    await tools.memory.indexConcept({
       id: output.decisionId,
       text: `${selected.title} — ${selected.format} · ${selected.pillar} — ${selected.concept}`,
       metadata: { pillar: selected.pillar, format: selected.format },
     });
   }
+}
 
-  /** Next actions above the agent's own level are proposals that need human approval. */
-  private classifyNextActions(proposal: ExecutiveProposal, permissions: PermissionGuard): NextAction[] {
-    return proposal.nextActions.map((a) => {
-      const requiredPermission = PermissionGuard.classifyAction(a.action);
-      const external = atLeast(requiredPermission, 'LEVEL_4_EXTERNAL_ACTION');
-      const withinLevel = atLeast(permissions.effectiveLevel, requiredPermission);
-      return {
-        action: a.action,
-        agent: a.agent,
-        requiredPermission,
-        status: external || !withinLevel ? 'REQUIRES_APPROVAL' : 'PROPOSED',
-        ...(external ? { note: 'External action: blocked in Phase 6 and always requires human approval.' } : {}),
-      };
-    });
-  }
+/**
+ * Next actions: the required level is the higher of what the text implies and
+ * the owning agent's declared level. External (LEVEL_4+) actions and actions
+ * for unknown agents always require human approval.
+ */
+export function classifyNextActions(proposal: ExecutiveProposal, tools: Pick<ToolKit, 'agents'>): NextAction[] {
+  return proposal.nextActions.map((a) => {
+    const owner = tools.agents.describe(a.agent);
+    const requiredPermission = requiredLevelForAction(a.action, owner?.permissionLevel ?? null);
+    const external = atLeast(requiredPermission, 'LEVEL_4_EXTERNAL_ACTION');
+    const needsApproval = external || owner === null;
+    const note = external
+      ? 'External action: blocked in Phase 6 and always requires human approval.'
+      : owner === null
+        ? `Unknown agent "${a.agent}": requires human review.`
+        : undefined;
+    return {
+      action: a.action,
+      agent: a.agent,
+      requiredPermission,
+      status: needsApproval ? 'REQUIRES_APPROVAL' : 'PROPOSED',
+      ...(note ? { note } : {}),
+    };
+  });
+}
+
+function executionTypeOf(costType: string): ModelUsage['executionType'] {
+  return costType === 'LOCAL_COMPUTE' ? 'LOCAL' : costType === 'NONE' ? 'MOCK' : 'CLOUD';
 }
 
 /** Heuristic tiering of goals (overridable per request). */
@@ -357,6 +350,7 @@ export function selectOption(proposal: ExecutiveProposal, evaluation: Evaluation
 function toModelUsage(purpose: string, routed: RoutedGeneration<unknown>): ModelUsage {
   return {
     purpose,
+    executionType: routed.result.executionType,
     provider: routed.result.provider,
     model: routed.result.model,
     routingCategory: routed.plan.category,

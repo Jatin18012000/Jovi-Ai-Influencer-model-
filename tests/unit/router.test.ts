@@ -11,7 +11,7 @@ import { createTestCore } from '../helpers.js';
 
 const cloudA = () => new MockProvider({ id: 'anthropic', kind: 'CLOUD', model: 'cloud-a' });
 const cloudB = () => new MockProvider({ id: 'openai', kind: 'CLOUD', model: 'cloud-b' });
-const local = () => new MockProvider({ id: 'ollama', kind: 'LOCAL', model: 'local-1' });
+const local = () => new MockProvider({ id: 'lmstudio', kind: 'LOCAL', model: 'local-1' });
 const mock = () => new MockProvider();
 
 describe('Model router — selection policy', () => {
@@ -23,15 +23,23 @@ describe('Model router — selection policy', () => {
     expect(ModelRouter.tierOf(RoutingRequestSchema.parse({ taskType: 't' }))).toBe('NORMAL');
   });
 
-  it('LOW prefers local; NORMAL prefers cloud; mock is always last', async () => {
-    core = await createTestCore({ providers: [mock(), cloudA(), local()] });
+  it('LOW routes to LM Studio first; NORMAL prefers cloud', async () => {
+    core = await createTestCore({ providers: [cloudA(), local()] });
     const low = await core.router.plan({ taskType: 't', complexity: 'LOW' });
-    expect(low.candidates.map((c) => c.provider)).toEqual(['ollama', 'anthropic', 'mock']);
-    expect(low.reason).toMatch(/prefer local/);
+    expect(low.candidates.map((c) => c.provider)).toEqual(['lmstudio', 'anthropic']);
+    expect(low.reason).toMatch(/LM Studio/);
 
     const normal = await core.router.plan({ taskType: 't', complexity: 'NORMAL' });
-    expect(normal.candidates.map((c) => c.provider)).toEqual(['anthropic', 'ollama', 'mock']);
+    expect(normal.candidates.map((c) => c.provider)).toEqual(['anthropic', 'lmstudio']);
     expect(normal.degraded).toBe(false);
+  });
+
+  it('never mixes the simulation-only mock with real providers', async () => {
+    await expect(createTestCore({ providers: [cloudA(), mock()] })).rejects.toThrow(/simulation-only/);
+    await expect(createTestCore({ providers: [mock(), local()] })).rejects.toThrow(/simulation-only/);
+    core = await createTestCore({ providers: [mock()] });
+    expect(core.providers.isSimulation()).toBe(true);
+    expect((await core.router.plan({ taskType: 't' })).reason).toMatch(/SIMULATION MODE/);
   });
 
   it('HIGH/STRATEGIC use cloud, and flag degraded local fallback when cloud is unavailable', async () => {
@@ -41,7 +49,7 @@ describe('Model router — selection policy', () => {
 
     core = await createTestCore({ providers: [local()] });
     const high = await core.router.plan({ taskType: 't', quality: 'HIGH' });
-    expect(high.candidates.map((c) => c.provider)).toEqual(['ollama']);
+    expect(high.candidates.map((c) => c.provider)).toEqual(['lmstudio']);
     expect(high.degraded).toBe(true);
     expect(high.reason).toMatch(/degraded/);
   });
@@ -55,13 +63,13 @@ describe('Model router — selection policy', () => {
   it('LOCAL_ONLY privacy never routes to cloud', async () => {
     core = await createTestCore({ providers: [cloudA(), local()] });
     const plan = await core.router.plan({ taskType: 't', complexity: 'STRATEGIC', privacy: 'LOCAL_ONLY' });
-    expect(plan.candidates.map((c) => c.provider)).toEqual(['ollama']);
+    expect(plan.candidates.map((c) => c.provider)).toEqual(['lmstudio']);
   });
 
   it('excludes models (e.g. evaluator must differ from generator) and lists unavailable providers', async () => {
     core = await createTestCore({ providers: [cloudA(), local(), new MockProvider({ id: 'gemini', kind: 'CLOUD', available: false })] });
     const plan = await core.router.plan({ taskType: 't', excludeModels: ['anthropic:cloud-a'] });
-    expect(plan.candidates.map((c) => c.provider)).toEqual(['ollama']);
+    expect(plan.candidates.map((c) => c.provider)).toEqual(['lmstudio']);
     expect(plan.unavailable.map((u) => u.provider)).toEqual(['gemini']);
   });
 
@@ -71,7 +79,7 @@ describe('Model router — selection policy', () => {
       .generate({ task: { type: 't' }, context: { system: '', prompt: '' } }, { taskType: 't' }, { purpose: 'test', correlationId: 'c' }, (t) => t)
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(NoModelAvailableError);
-    expect((error as Error).message).toMatch(/JOVI_ENABLE_MOCK_PROVIDER/);
+    expect((error as Error).message).toMatch(/LM Studio/);
   });
 });
 
@@ -90,21 +98,21 @@ describe('Model router — fallback and observability', () => {
 
   it('falls back to the next provider on failure and records everything', async () => {
     const failing = new MockProvider({ id: 'anthropic', kind: 'CLOUD', model: 'cloud-a', failures: 5, failureMode: 'PERMANENT' });
-    const backup = new MockProvider({ id: 'ollama', kind: 'LOCAL', model: 'local-1', responder: () => '{"ok":true}' });
+    const backup = new MockProvider({ id: 'lmstudio', kind: 'LOCAL', model: 'local-1', responder: () => '{"ok":true}' });
     core = await createTestCore({ providers: [failing, backup] });
     const correlationId = newId('correlation');
 
     const routed = await run(core, correlationId);
-    expect(routed.result.provider).toBe('ollama');
+    expect(routed.result.provider).toBe('lmstudio');
     expect(routed.fallbackUsed).toBe(true);
     expect(routed.attempts.map((a) => [a.provider, a.status])).toEqual([
       ['anthropic', 'FAILED'],
-      ['ollama', 'SUCCEEDED'],
+      ['lmstudio', 'SUCCEEDED'],
     ]);
 
     const events = core.events.list({ correlationId });
     expect(events.map((e) => e.eventType)).toEqual(['MODEL_SELECTED', 'MODEL_FALLBACK']);
-    expect(events[1]?.payload).toMatchObject({ from: 'anthropic:cloud-a', to: 'ollama:local-1' });
+    expect(events[1]?.payload).toMatchObject({ from: 'anthropic:cloud-a', to: 'lmstudio:local-1' });
 
     const runs = core.database.db.select().from(modelRuns).all().filter((r) => r.correlationId === correlationId);
     expect(runs).toHaveLength(2);
@@ -139,7 +147,7 @@ describe('Model router — fallback and observability', () => {
     core = await createTestCore({
       providers: [
         new MockProvider({ id: 'anthropic', kind: 'CLOUD', failures: 9 }),
-        new MockProvider({ id: 'ollama', kind: 'LOCAL', failures: 9 }),
+        new MockProvider({ id: 'lmstudio', kind: 'LOCAL', failures: 9 }),
       ],
     });
     const error = await run(core, newId('correlation')).catch((e: unknown) => e);

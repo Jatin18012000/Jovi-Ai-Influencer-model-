@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { PermissionLevel, RoutingTier } from '../../types/enums.js';
+import { PermissionLevel, PrivacyRequirement, ProviderKind, RoutingTier } from '../../types/enums.js';
 
 /**
  * Executive Agent contracts.
@@ -110,6 +110,8 @@ export const ExecutiveInputSchema = z.object({
   goal: z.string().trim().min(5, 'goal must be at least 5 characters').max(2000),
   /** Optional override of the routing tier; otherwise derived from the goal. */
   tier: RoutingTier.optional(),
+  /** LOCAL_ONLY keeps generation and evaluation on LM Studio. */
+  privacy: PrivacyRequirement.optional(),
   constraints: z.array(z.string().max(300)).max(10).default([]),
 });
 export type ExecutiveInput = z.infer<typeof ExecutiveInputSchema>;
@@ -125,6 +127,8 @@ export type NextAction = z.infer<typeof NextActionSchema>;
 
 export const ModelUsageSchema = z.object({
   purpose: z.string(),
+  /** CLOUD API, LOCAL (LM Studio) or MOCK (simulation). */
+  executionType: ProviderKind,
   provider: z.string(),
   model: z.string(),
   routingCategory: z.string(),

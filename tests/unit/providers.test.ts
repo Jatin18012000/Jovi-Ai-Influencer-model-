@@ -3,7 +3,6 @@ import { ProviderError, ProviderUnavailableError } from '../../src/core/errors.j
 import { estimateCloudCost } from '../../src/models/pricing.js';
 import { AnthropicProvider, GeminiProvider, OpenAIProvider } from '../../src/models/providers/cloud-providers.js';
 import { MockProvider } from '../../src/models/providers/mock-provider.js';
-import { OllamaProvider } from '../../src/models/providers/ollama-provider.js';
 import type { GenerateRequest, ModelProvider } from '../../src/models/types.js';
 
 const request: GenerateRequest = {
@@ -119,52 +118,5 @@ describe('Cloud adapters (HTTP mapped, no real calls)', () => {
 
   it('reports unknown pricing as null instead of inventing a number', () => {
     expect(estimateCloudCost('openai', 'some-future-model', { inputTokens: 10, outputTokens: 10 }).estimatedApiCost).toBeNull();
-  });
-});
-
-describe('Ollama provider', () => {
-  it('reports unreachable Ollama clearly', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => {
-      throw new TypeError('fetch failed');
-    }));
-    const status = await new OllamaProvider({ url: 'http://localhost:11434', model: undefined, timeoutMs: 1000 }).checkAvailability();
-    expect(status.available).toBe(false);
-    expect(status.reason).toMatch(/not reachable/);
-  });
-
-  it('reports clearly when no models are installed (and never pulls one)', async () => {
-    const fetchMock = vi.fn(async (_url: string) => jsonResponse({ models: [] }));
-    vi.stubGlobal('fetch', fetchMock);
-    const status = await new OllamaProvider({ url: 'http://localhost:11434', model: 'llama3.1:8b', timeoutMs: 1000 }).checkAvailability();
-    expect(status.available).toBe(false);
-    expect(status.reason).toMatch(/no models are installed/);
-    expect(fetchMock.mock.calls.every(([url]) => !String(url).includes('/api/pull'))).toBe(true);
-  });
-
-  it('detects installed models, prefers OLLAMA_MODEL, skips embedding models', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ models: [{ name: 'nomic-embed-text:latest' }, { name: 'qwen2.5:7b' }, { name: 'llama3.1:8b' }] })));
-    const configured = await new OllamaProvider({ url: 'http://o', model: 'llama3.1:8b', timeoutMs: 1000 }).checkAvailability();
-    expect(configured.available).toBe(true);
-    expect(configured.selectedModel).toBe('llama3.1:8b');
-    expect(configured.models.map((m) => m.model)).not.toContain('nomic-embed-text:latest');
-
-    const fallback = await new OllamaProvider({ url: 'http://o', model: 'missing:1b', timeoutMs: 1000 }).checkAvailability();
-    expect(fallback.selectedModel).toBe('qwen2.5:7b');
-    expect(fallback.reason).toMatch(/not installed/);
-  });
-
-  it('generates via /api/chat and labels cost as LOCAL_COMPUTE', async () => {
-    const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
-      if (url.endsWith('/api/tags')) return jsonResponse({ models: [{ name: 'llama3.1:8b' }] });
-      return jsonResponse({ model: 'llama3.1:8b', message: { content: '{"x":1}' }, prompt_eval_count: 50, eval_count: 20, total_duration: 1e9 });
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    const provider = new OllamaProvider({ url: 'http://o', model: undefined, timeoutMs: 1000 });
-    await provider.checkAvailability();
-    const result = await provider.generate(request);
-    const chatCall = fetchMock.mock.calls.find(([url]) => url.endsWith('/api/chat'))!;
-    expect(JSON.parse(String(chatCall[1]?.body))).toMatchObject({ model: 'llama3.1:8b', stream: false, format: 'json' });
-    expect(result.cost).toMatchObject({ estimatedApiCost: 0, executionCostType: 'LOCAL_COMPUTE' });
-    expect(result.usage).toEqual({ inputTokens: 50, outputTokens: 20 });
   });
 });

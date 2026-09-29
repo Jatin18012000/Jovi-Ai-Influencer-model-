@@ -34,6 +34,18 @@ export class NotFoundError extends JoviError {
   }
 }
 
+export class ConflictError extends JoviError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, { code: 'CONFLICT', retryable: false, ...(details ? { details } : {}) });
+  }
+}
+
+export class RateLimitedError extends JoviError {
+  constructor(message: string, readonly retryAfterSeconds: number) {
+    super(message, { code: 'RATE_LIMITED', retryable: true, details: { retryAfterSeconds } });
+  }
+}
+
 export class PermissionDeniedError extends JoviError {
   constructor(message: string, details?: Record<string, unknown>) {
     super(message, { code: 'PERMISSION_DENIED', retryable: false, ...(details ? { details } : {}) });
@@ -71,7 +83,7 @@ export class InvalidModelOutputError extends JoviError {
 }
 
 export class NoModelAvailableError extends JoviError {
-  /** Retryable by default: a provider may come back (e.g. Ollama restarting). */
+  /** Retryable by default: a provider may come back (e.g. the LM Studio server restarting). */
   constructor(message: string, details?: Record<string, unknown>, retryable = true) {
     super(message, { code: 'NO_MODEL_AVAILABLE', retryable, ...(details ? { details } : {}) });
   }

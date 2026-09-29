@@ -24,10 +24,50 @@ export interface RuleCheck {
 interface Rule {
   rule: string;
   /** FAIL blocks an option from selection. */
-  check(text: string, option: EvaluableOption, knownPillars: readonly string[]): RuleCheck;
+  check(content: string, option: EvaluableOption, knownPillars: readonly string[]): RuleCheck;
 }
 
-const HUMAN_CLAIM = /\b(i'?m|i am|as) (a )?(real|actual) (person|human|girl|woman)\b|\b(i'?m|i am) (not (an? )?(ai|bot|robot)|human)\b|\bnot an ai\b/i;
+/**
+ * Only content that would actually be *published or performed* is scanned.
+ * `risks`, `originalityNote` and similar meta fields describe safeguards
+ * ("keep it non-explicit", "never reveal her address") and must never be
+ * treated as violations.
+ */
+const CONTENT_FIELDS = ['title', 'hook', 'concept', 'structure', 'audienceValue', 'caption', 'script', 'onScreenText'] as const;
+
+export function contentText(option: EvaluableOption): string {
+  const record = option as Record<string, unknown>;
+  return CONTENT_FIELDS.map((field) => record[field])
+    .flatMap((value) => (Array.isArray(value) ? value : [value]))
+    .filter((value): value is string => typeof value === 'string')
+    .join('\n');
+}
+
+/** Negation / safeguard cues in the same sentence before a match ("never", "avoid", "no", "non-"…). */
+const NEGATION_BEFORE =
+  /\b(no|not|non|never|avoid(s|ed|ing)?|without|don'?t|doesn'?t|do not|does not|must not|mustn'?t|won'?t|shouldn'?t|refus(e|es|ing)|instead of|rather than|free of|zero)\b|non-\s*$/i;
+/** Safeguard cues right after a privacy mention ("… stays private"). */
+const PRIVATE_AFTER = /^[^.!?;\n]{0,40}\b(private|secret|hidden|off[- ]camera|a mystery|undisclosed|confidential)\b/i;
+
+/**
+ * Returns the first match of `pattern` in `text` that is not negated or
+ * framed as a safeguard within its sentence, or null.
+ */
+export function findViolation(text: string, pattern: RegExp, options: { privacySuffix?: boolean } = {}): string | null {
+  const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+  for (const match of text.matchAll(global)) {
+    const index = match.index ?? 0;
+    const before = text.slice(Math.max(0, index - 80), index);
+    const sentenceStart = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf(';'), before.lastIndexOf('\n'));
+    const prefix = before.slice(sentenceStart + 1);
+    if (NEGATION_BEFORE.test(prefix)) continue;
+    if (options.privacySuffix && PRIVATE_AFTER.test(text.slice(index + match[0].length))) continue;
+    return match[0];
+  }
+  return null;
+}
+
+const HUMAN_CLAIM = /\b(i'?m|i am|she'?s|she is|as) (a )?(real|actual) (person|human|girl|woman)\b|\b(i'?m|i am) (not (an? )?(ai|bot|robot)|human)\b|\bnot an ai\b/i;
 const PRIVACY = [
   /\b(my|her) (home )?address\b/i,
   /\bwhere (i|she) (actually )?lives?\b/i,
@@ -35,7 +75,7 @@ const PRIVACY = [
   /\b(my|her) (boyfriend|girlfriend|partner|husband|ex)\b/i,
   /\b(my|her) (salary|bank balance|net worth|income|savings)\b/i,
 ];
-const EXPLICIT = /\b(nude|nudity|explicit|nsfw|onlyfans|x-rated|porn)\b/i;
+const EXPLICIT = /(?<!non-)\b(nude|nudity|explicit|nsfw|onlyfans|x-rated|porn)\b/i;
 const CLICHES = [
   'rise and grind',
   'no days off',
@@ -58,31 +98,35 @@ const CLICHES = [
 const RULES: Rule[] = [
   {
     rule: 'AI_TRANSPARENCY',
-    check: (text) =>
-      HUMAN_CLAIM.test(text)
-        ? { rule: 'AI_TRANSPARENCY', outcome: 'FAIL', detail: 'Content implies Jovi is human; she is openly AI.' }
-        : { rule: 'AI_TRANSPARENCY', outcome: 'PASS', detail: 'No false claim of being human.' },
+    check: (content) => {
+      const hit = findViolation(content, HUMAN_CLAIM);
+      return hit
+        ? { rule: 'AI_TRANSPARENCY', outcome: 'FAIL', detail: `Content implies Jovi is human ("${hit}"); she is openly AI.` }
+        : { rule: 'AI_TRANSPARENCY', outcome: 'PASS', detail: 'No false claim of being human.' };
+    },
   },
   {
     rule: 'PRIVACY_BOUNDARIES',
-    check: (text) => {
-      const hit = PRIVACY.find((re) => re.test(text));
+    check: (content) => {
+      const hit = PRIVACY.map((re) => findViolation(content, re, { privacySuffix: true })).find((m) => m !== null);
       return hit
-        ? { rule: 'PRIVACY_BOUNDARIES', outcome: 'FAIL', detail: `Touches a private area (${hit.source}).` }
+        ? { rule: 'PRIVACY_BOUNDARIES', outcome: 'FAIL', detail: `Content exposes a private area ("${hit}").` }
         : { rule: 'PRIVACY_BOUNDARIES', outcome: 'PASS', detail: 'No private family/location/relationship/finance details.' };
     },
   },
   {
     rule: 'PLATFORM_SAFETY',
-    check: (text) =>
-      EXPLICIT.test(text)
-        ? { rule: 'PLATFORM_SAFETY', outcome: 'FAIL', detail: 'Explicit content is outside platform and brand guidelines.' }
-        : { rule: 'PLATFORM_SAFETY', outcome: 'PASS', detail: 'No explicit content markers.' },
+    check: (content) => {
+      const hit = findViolation(content, EXPLICIT);
+      return hit
+        ? { rule: 'PLATFORM_SAFETY', outcome: 'FAIL', detail: `Explicit content ("${hit}") is outside platform and brand guidelines.` }
+        : { rule: 'PLATFORM_SAFETY', outcome: 'PASS', detail: 'No explicit content markers.' };
+    },
   },
   {
     rule: 'VOICE_CLICHES',
-    check: (text) => {
-      const lower = text.toLowerCase();
+    check: (content) => {
+      const lower = content.toLowerCase();
       const found = CLICHES.filter((c) => lower.includes(c));
       return found.length
         ? { rule: 'VOICE_CLICHES', outcome: 'WARN', detail: `Generic/cliché phrasing: ${found.join(', ')}.` }
@@ -91,7 +135,7 @@ const RULES: Rule[] = [
   },
   {
     rule: 'PILLAR_ALIGNMENT',
-    check: (_text, option, knownPillars) => {
+    check: (_content, option, knownPillars) => {
       if (!option.pillar) return { rule: 'PILLAR_ALIGNMENT', outcome: 'WARN', detail: 'No content pillar declared.' };
       const p = option.pillar.toLowerCase();
       const match = knownPillars.find((k) => {
@@ -105,7 +149,7 @@ const RULES: Rule[] = [
   },
   {
     rule: 'PERSONALITY_PRESENT',
-    check: (_text, option) =>
+    check: (_content, option) =>
       option.personalityTraits && option.personalityTraits.length > 0
         ? { rule: 'PERSONALITY_PRESENT', outcome: 'PASS', detail: `Expresses: ${option.personalityTraits.slice(0, 4).join(', ')}.` }
         : { rule: 'PERSONALITY_PRESENT', outcome: 'WARN', detail: 'No explicit personality traits — risk of generic content.' },
@@ -113,8 +157,8 @@ const RULES: Rule[] = [
 ];
 
 export function runRuleChecks(option: EvaluableOption, knownPillars: readonly string[]): RuleCheck[] {
-  const text = JSON.stringify(option);
-  return RULES.map((r) => r.check(text, option, knownPillars));
+  const content = contentText(option);
+  return RULES.map((r) => r.check(content, option, knownPillars));
 }
 
 export function isBlocked(checks: readonly RuleCheck[]): boolean {

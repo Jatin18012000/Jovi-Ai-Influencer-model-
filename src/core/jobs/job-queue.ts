@@ -4,7 +4,7 @@ import type { JoviDatabase } from '../../database/client.js';
 import { jobs } from '../../database/schema.js';
 import type { JobStatus } from '../../types/enums.js';
 import type { Logger } from '../config/logger.js';
-import { NotFoundError, ValidationError, errorMessage, isRetryable, serializeError } from '../errors.js';
+import { JoviError, NotFoundError, ValidationError, errorMessage, isRetryable, serializeError } from '../errors.js';
 import type { CorrelationScope, EventBus } from '../events/event-bus.js';
 import { newId, nowIso } from '../ids.js';
 
@@ -27,6 +27,8 @@ export interface JobQueueOptions {
   defaultMaxAttempts: number;
   backoffMs: number;
   sleep?: (ms: number) => Promise<void>;
+  /** How often a running (or reserved) job refreshes its lock, proving its owner is alive. */
+  heartbeatMs?: number;
 }
 
 const SOURCE = 'core.jobs';
@@ -115,7 +117,10 @@ export class JobQueue {
         throw new ValidationError(`Job ${jobId} is already running`);
       }
       const waitMs = Date.parse(current.runAfter) - Date.now();
-      if (waitMs > 0) await this.sleep(waitMs);
+      if (waitMs > 0) {
+        this.touch(jobId);
+        await this.sleep(waitMs);
+      }
       const claimed = this.claim(jobId);
       if (!claimed) return this.get(jobId);
       await this.attempt(claimed, true);
@@ -137,16 +142,53 @@ export class JobQueue {
     return this.get(jobId);
   }
 
-  /** Crash recovery: RUNNING jobs whose lock is older than `staleMs` go back to RETRYING. */
-  recoverStale(staleMs: number): number {
+  /**
+   * Crash recovery for jobs whose lock has not been refreshed for `staleMs`
+   * (live owners refresh it via heartbeat):
+   *  - RUNNING with attempts left       → RETRYING, lock released (a worker resumes it)
+   *  - RUNNING with attempts exhausted  → FAILED (+ the handler's onFinalFailure, e.g. task FAILED)
+   *  - QUEUED/RETRYING still reserved   → reservation released (the synchronous owner died)
+   */
+  async recoverStale(staleMs: number): Promise<{ requeued: number; failed: number; released: number }> {
+    const now = nowIso();
     const cutoff = new Date(Date.now() - staleMs).toISOString();
-    const result = this.sqlite
+    const stale = this.sqlite
       .prepare(
-        `UPDATE jobs SET status = 'RETRYING', locked_at = NULL, updated_at = @now
-         WHERE status = 'RUNNING' AND locked_at IS NOT NULL AND locked_at < @cutoff`,
+        `SELECT id, status, attempts, max_attempts AS maxAttempts FROM jobs
+         WHERE status IN ('RUNNING', 'QUEUED', 'RETRYING') AND locked_at IS NOT NULL AND locked_at < @cutoff`,
       )
-      .run({ cutoff, now: nowIso() });
-    return result.changes;
+      .all({ cutoff }) as Array<{ id: string; status: JobStatus; attempts: number; maxAttempts: number }>;
+
+    const counts = { requeued: 0, failed: 0, released: 0 };
+    for (const row of stale) {
+      const job = this.get(row.id);
+      const scope = this.bus.scope(job.correlationId);
+      if (row.status === 'RUNNING' && row.attempts >= row.maxAttempts) {
+        const error = new JoviError('Job owner stopped responding and no attempts remain', { code: 'STALE_JOB', retryable: false });
+        this.update(job.id, { status: 'FAILED', lastError: serializeError(error), lockedAt: null, completedAt: now });
+        scope.emit('JOB_FAILED', SOURCE, job.id, { taskId: job.taskId, attempt: job.attempts, recovered: true, error: serializeError(error) });
+        const handler = this.handlers.get(job.type);
+        if (handler?.onFinalFailure) {
+          const logger = this.logger.child({ jobId: job.id, taskId: job.taskId, correlationId: job.correlationId });
+          try {
+            await handler.onFinalFailure({ job, attempt: job.attempts, scope, logger }, error);
+          } catch (hookError) {
+            logger.error({ err: errorMessage(hookError) }, 'job onFinalFailure hook failed during recovery');
+          }
+        }
+        counts.failed += 1;
+      } else if (row.status === 'RUNNING') {
+        this.update(job.id, { status: 'RETRYING', lockedAt: null, runAfter: now });
+        scope.emit('JOB_RECOVERED', SOURCE, job.id, { taskId: job.taskId, from: 'RUNNING', to: 'RETRYING', attempts: job.attempts });
+        counts.requeued += 1;
+      } else {
+        this.update(job.id, { lockedAt: null });
+        scope.emit('JOB_RECOVERED', SOURCE, job.id, { taskId: job.taskId, from: `${row.status} (reserved)`, to: row.status, attempts: job.attempts });
+        counts.released += 1;
+      }
+    }
+    if (stale.length) this.logger.warn({ ...counts, staleMs }, 'recovered stale jobs');
+    return counts;
   }
 
   private claim(jobId: string): Job | null {
@@ -188,6 +230,11 @@ export class JobQueue {
 
     scope.emit('JOB_STARTED', SOURCE, job.id, { taskId: job.taskId, attempt: job.attempts, maxAttempts: job.maxAttempts });
     const started = Date.now();
+    // Heartbeat: keep the lock fresh while this process is working on the job.
+    const heartbeat = this.options.heartbeatMs
+      ? setInterval(() => this.touch(job.id), this.options.heartbeatMs)
+      : null;
+    heartbeat?.unref();
 
     try {
       if (!handler) throw new ValidationError(`No handler registered for job type ${job.type}`);
@@ -221,8 +268,15 @@ export class JobQueue {
           }
         }
       }
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
     }
     return this.get(job.id);
+  }
+
+  /** Refreshes the lock of a job this process owns. */
+  private touch(jobId: string): void {
+    this.sqlite.prepare(`UPDATE jobs SET locked_at = @now WHERE id = @id AND locked_at IS NOT NULL`).run({ id: jobId, now: nowIso() });
   }
 
   private update(id: string, fields: Partial<Job>): void {

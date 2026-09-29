@@ -73,16 +73,18 @@ const SOURCE = 'models.router';
 /**
  * Model Router.
  *
- * Policy (Phase 5):
- *   LOW        → prefer local (Ollama); cloud as fallback.
- *   NORMAL     → prefer configured cloud; local as fallback.
- *   HIGH       → cloud; local only as a flagged (degraded) fallback.
- *   STRATEGIC  → cloud + independent evaluator when available.
- *   Privacy LOCAL_ONLY restricts to local; SENSITIVE prefers local.
- *   The mock provider, when enabled, is always the last resort.
+ * Policy:
+ *   LOW (local tasks) → LM Studio; cloud only if JOVI_ALLOW_CLOUD_FALLBACK.
+ *   NORMAL            → configured cloud (JOVI_CLOUD_PREFERENCE); LM Studio fallback.
+ *   HIGH              → cloud; LM Studio only as a flagged (degraded) fallback.
+ *   STRATEGIC         → cloud + independent evaluator when available.
+ *   Privacy LOCAL_ONLY → LM Studio only; SENSITIVE → LM Studio preferred.
+ *   The MockProvider is never a candidate next to real providers (the registry
+ *   refuses to mix them); it only routes in explicit simulation mode.
  *
- * Every attempt is recorded in `model_runs` and surfaced as MODEL_SELECTED /
- * MODEL_FALLBACK events, so routing is fully observable.
+ * Timeouts are per provider (cloud vs. local inference) — the router does not
+ * cap them. Every attempt is recorded in `model_runs` and surfaced as
+ * MODEL_SELECTED / MODEL_FALLBACK events, so routing is fully observable.
  */
 export class ModelRouter {
   constructor(
@@ -90,7 +92,7 @@ export class ModelRouter {
     private readonly db: JoviDatabase,
     private readonly logger: Logger,
     private readonly prompts: PromptLibrary,
-    private readonly options: { cloudPreference: string[]; timeoutMs: number },
+    private readonly options: { cloudPreference: string[]; allowCloudFallback: boolean },
   ) {}
 
   static tierOf(request: ResolvedRoutingRequest): RoutingTier {
@@ -113,34 +115,42 @@ export class ModelRouter {
     });
     const notExcluded = (c: RouteCandidate) => !request.excludeModels.includes(`${c.provider}:${c.model}`);
 
+    if (this.registry.isSimulation()) {
+      const simulated = usable.map(toCandidate).filter(notExcluded);
+      return { category, reason: 'SIMULATION MODE: deterministic mock provider (no real inference)', candidates: simulated, degraded: false, unavailable };
+    }
+
     const local = usable.filter((s) => s.kind === 'LOCAL').map(toCandidate).filter(notExcluded);
     const cloud = usable
       .filter((s) => s.kind === 'CLOUD')
       .map(toCandidate)
       .filter(notExcluded)
       .sort((a, b) => this.cloudRank(a.provider) - this.cloudRank(b.provider));
-    const mock = usable.filter((s) => s.kind === 'MOCK').map(toCandidate).filter(notExcluded);
+    const cloudFallback = this.options.allowCloudFallback ? cloud : [];
 
     let candidates: RouteCandidate[];
     let reason: string;
     if (request.privacy === 'LOCAL_ONLY') {
-      candidates = [...local, ...mock];
-      reason = 'privacy LOCAL_ONLY: restricted to local models';
+      candidates = local;
+      reason = 'privacy LOCAL_ONLY: restricted to LM Studio';
     } else if (request.privacy === 'SENSITIVE') {
-      candidates = [...local, ...cloud, ...mock];
-      reason = 'privacy SENSITIVE: local preferred, cloud fallback';
+      candidates = [...local, ...cloudFallback];
+      reason = `privacy SENSITIVE: LM Studio preferred${this.options.allowCloudFallback ? ', cloud fallback' : ', cloud fallback disabled'}`;
     } else if (category === 'LOW' || request.costClass === 'FREE') {
-      candidates = [...local, ...cloud, ...mock];
-      reason = `${category} tier${request.costClass === 'FREE' ? ' / FREE cost class' : ''}: prefer local model`;
+      candidates = [...local, ...cloudFallback];
+      reason = `${category} tier${request.costClass === 'FREE' ? ' / FREE cost class' : ''}: local task → LM Studio${
+        this.options.allowCloudFallback ? ', cloud fallback' : ', cloud fallback disabled'
+      }`;
     } else {
-      candidates = [...cloud, ...local, ...mock];
+      candidates = [...cloud, ...local];
       reason =
         category === 'NORMAL'
-          ? 'NORMAL tier: prefer configured cloud model'
+          ? 'NORMAL tier: prefer configured cloud model; LM Studio fallback'
           : category === 'HIGH'
-            ? 'HIGH tier: cloud model required; local only as degraded fallback'
+            ? 'HIGH tier: cloud model required; LM Studio only as degraded fallback'
             : 'STRATEGIC tier: cloud model plus independent evaluator';
     }
+    reason += ` [latency ${request.latency}]`;
 
     const first = candidates[0];
     const degraded = (category === 'HIGH' || category === 'STRATEGIC') && first !== undefined && first.kind !== 'CLOUD';
@@ -164,12 +174,12 @@ export class ModelRouter {
     if (plan.candidates.length === 0) {
       throw new NoModelAvailableError(
         `No model available for ${resolved.taskType} (${plan.category}). ` +
-          `Configure a cloud API key, start Ollama with an installed model, or enable the mock provider (JOVI_ENABLE_MOCK_PROVIDER=true).`,
+          'Configure a cloud API key, or start the LM Studio local server with a model loaded ' +
+          '(or run in simulation mode: JOVI_SIMULATION_MODE=true / `npm run jovi -- --simulate`).',
         { unavailable: plan.unavailable },
       );
     }
 
-    const timeoutMs = this.timeoutFor(resolved.latency);
     const attempts: AttemptRecord[] = [];
     const errors: unknown[] = [];
     let attemptNo = 0;
@@ -202,7 +212,8 @@ export class ModelRouter {
 
       let generateRequest: GenerateRequest = {
         ...request,
-        requirements: { ...request.requirements, model: candidate.model, timeoutMs: request.requirements?.timeoutMs ?? timeoutMs },
+        // Timeout left to the provider (cloud vs. local inference) unless the caller sets one.
+        requirements: { ...request.requirements, model: candidate.model },
       };
 
       // Up to two tries per candidate: the original, plus one JSON repair.
@@ -281,12 +292,6 @@ export class ModelRouter {
   private cloudRank(provider: string): number {
     const index = this.options.cloudPreference.indexOf(provider);
     return index === -1 ? Number.MAX_SAFE_INTEGER : index;
-  }
-
-  private timeoutFor(latency: z.infer<typeof LatencyRequirement>): number {
-    if (latency === 'INTERACTIVE') return Math.min(this.options.timeoutMs, 90_000);
-    if (latency === 'BATCH') return this.options.timeoutMs * 2;
-    return this.options.timeoutMs;
   }
 
   private record(

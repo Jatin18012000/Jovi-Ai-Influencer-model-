@@ -2,7 +2,7 @@ import type { z } from 'zod';
 import type { Logger } from '../core/config/logger.js';
 import type { CorrelationScope } from '../core/events/event-bus.js';
 import type { PermissionGuard, ToolName } from '../core/permissions/permissions.js';
-import type { RunTrace } from '../models/router/model-router.js';
+import type { ToolKit } from './toolkit.js';
 import type { CostClass, LatencyRequirement, PermissionLevel, PrivacyRequirement, RiskLevel, RoutingTier } from '../types/enums.js';
 
 export interface ModelRequirements {
@@ -25,7 +25,11 @@ export interface AgentDefinition {
   riskLevel: RiskLevel;
 }
 
-/** Runtime handles given to an agent for a single run. */
+/**
+ * Runtime handles given to an agent for a single run. Agents act on the system
+ * ONLY through `tools`: every tool call is permission-checked and audited.
+ * `scope` is for emitting the agent's own domain events.
+ */
 export interface AgentRunContext {
   agentRunId: string;
   taskId: string | null;
@@ -33,9 +37,9 @@ export interface AgentRunContext {
   correlationId: string;
   scope: CorrelationScope;
   logger: Logger;
-  permissions: PermissionGuard;
-  /** Builds a model-run trace for the router so every model call is attributable. */
-  trace(purpose: string): RunTrace;
+  /** Read-only view of the agent's effective permissions. */
+  permissions: Pick<PermissionGuard, 'agentName' | 'effectiveLevel' | 'can'>;
+  tools: ToolKit;
 }
 
 /**

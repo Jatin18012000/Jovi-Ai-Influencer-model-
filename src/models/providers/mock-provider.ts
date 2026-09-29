@@ -17,9 +17,11 @@ export interface MockProviderOptions {
 }
 
 /**
- * Deterministic, offline provider. It performs no inference: it returns
- * canned, schema-valid Jovi responses so the full pipeline can run without
- * paid APIs or a local model. Every result is labeled `provider: mock`.
+ * SIMULATION / TEST ONLY. Deterministic, offline provider that performs no
+ * inference: it returns canned, schema-valid Jovi responses so the pipeline
+ * can be exercised without paid APIs or a local model. The provider registry
+ * refuses to combine it with real providers, so it can never be a production
+ * fallback; results are flagged `simulated: true`.
  */
 export class MockProvider implements ModelProvider {
   readonly id: string;
@@ -68,6 +70,7 @@ export class MockProvider implements ModelProvider {
     return {
       provider: this.id,
       model: this.model,
+      executionType: this.kind,
       output,
       usage: { inputTokens: null, outputTokens: null },
       latencyMs: 1,
@@ -97,7 +100,7 @@ export function mockExecutiveProposal(goal: string) {
   return {
     objective: goal,
     interpretation:
-      "Introduce Jovi to people who have never met her: in one short Reel they should get her humour, her taste and the fact that she's openly AI — and want to see what she does next.",
+      "[SIMULATED — canned output, no model inference] Introduce Jovi to people who have never met her: in one short Reel they should get her humour, her taste and the fact that she's openly AI — and want to see what she does next.",
     priorities: [
       'Personality first: the viewer should remember Jovi, not a format',
       'Own the AI transparency with confidence and wit',
@@ -168,7 +171,7 @@ export function mockExecutiveProposal(goal: string) {
     ],
     recommendedOptionId: 'A',
     rationaleSummary:
-      'Option A introduces the most of Jovi in the fewest seconds — heritage, taste, humour and AI identity — and gives new viewers a reason to comment. B and C are strong follow-ups once the audience knows who she is.',
+      '[SIMULATED] Option A introduces the most of Jovi in the fewest seconds — heritage, taste, humour and AI identity — and gives new viewers a reason to comment. B and C are strong follow-ups once the audience knows who she is.',
     confidence: 0.72,
     nextActions: [
       { action: 'Write the 15-second script and on-screen text for the selected concept', agent: 'script' },
@@ -199,6 +202,6 @@ function mockEvaluation(optionsJson: string | undefined) {
       };
     }),
     recommendedOptionId: ids[0],
-    summary: 'Mock evaluation: prefers the first option as the clearest personality introduction.',
+    summary: '[SIMULATED] Mock evaluation: prefers the first option as the clearest personality introduction.',
   };
 }
