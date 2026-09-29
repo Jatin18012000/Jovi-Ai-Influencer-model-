@@ -15,6 +15,7 @@ Usage:
   npm run jovi -- --json "<goal>"           Print the raw JSON result
   npm run jovi -- --providers               Show model provider status (incl. LM Studio discovery)
   npm run jovi -- --identity                Show Jovi's active identity
+  npm run jovi -- --plan "<goal>"             Run Research → Trends → Strategy → Ideation
   npm run jovi -- --simulate "<goal>"       SIMULATION: canned mock output only, no real providers
 
 Configuration is read from the environment and .env (see .env.example).
@@ -31,6 +32,7 @@ async function main(): Promise<number> {
       tier: { type: 'string' },
       providers: { type: 'boolean', default: false },
       identity: { type: 'boolean', default: false },
+      plan: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -71,6 +73,12 @@ async function main(): Promise<number> {
       );
       await printProviders(core);
       return 2;
+    }
+
+    if (values.plan) {
+      const planning = await core.planning.execute({ goal, createdBy: 'cli' });
+      process.stdout.write(`${JSON.stringify(planning, null, 2)}\n`);
+      return planning.status === 'COMPLETED' ? 0 : 1;
     }
 
     const result = await core.orchestrator.executeGoal({
