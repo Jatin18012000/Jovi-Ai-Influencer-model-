@@ -2,6 +2,7 @@ import { AgentRegistry } from '../agents/agent-registry.js';
 import { AgentRunner } from '../agents/agent-runner.js';
 import type { ToolServices } from '../agents/toolkit.js';
 import { ExecutiveAgent } from '../agents/executive/executive-agent.js';
+import { CreatorPlanningPipeline, IdeationAgent, ResearchAgent, StrategyAgent, TrendsAgent } from '../agents/planning/planning-agents.js';
 import { PLANNED_AGENTS } from '../agents/planned-agents.js';
 import { openDatabase, runMigrations, type DatabaseHandle } from '../database/client.js';
 import { seedDatabase, type SeedReport } from '../database/seed.js';
@@ -61,6 +62,7 @@ export interface JoviCore {
   runner: AgentRunner;
   executive: ExecutiveAgent;
   orchestrator: JoviOrchestrator;
+  planning: CreatorPlanningPipeline;
   close(): Promise<void>;
 }
 
@@ -126,6 +128,10 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   };
   const runner = new AgentRunner(db, logger.child({ component: 'agents' }), config.permissions.maxLevel, toolServices);
   const orchestrator = new JoviOrchestrator({ tasks, jobs, events, runner, executive, logger: logger.child({ component: 'orchestrator' }) });
+  const planningAgents = [new ResearchAgent(), new TrendsAgent(), new StrategyAgent(), new IdeationAgent()];
+  for (const agent of planningAgents) agents.register(agent);
+  agents.syncToDatabase(db);
+  const planning = new CreatorPlanningPipeline({ tasks, events, runner });
 
   // Crash recovery on every start (after job handlers are registered).
   const jobRecovery = await jobs.recoverStale(config.jobs.staleMs);
@@ -165,6 +171,7 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
     runner,
     executive,
     orchestrator,
+    planning,
     close: async () => {
       await worker.stop();
       database.close();
