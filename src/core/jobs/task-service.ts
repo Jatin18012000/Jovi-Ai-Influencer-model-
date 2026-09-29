@@ -1,4 +1,4 @@
-import { desc, eq } from 'drizzle-orm';
+import { asc, desc, eq } from 'drizzle-orm';
 import type { JoviDatabase } from '../../database/client.js';
 import { tasks } from '../../database/schema.js';
 import type { TaskStatus } from '../../types/enums.js';
@@ -64,6 +64,11 @@ export class TaskService {
 
   list(limit = 50): Task[] {
     return this.db.select().from(tasks).orderBy(desc(tasks.createdAt)).limit(limit).all();
+  }
+
+  /** Follow-up tasks created under a parent (oldest first). */
+  listChildren(parentTaskId: string): Task[] {
+    return this.db.select().from(tasks).where(eq(tasks.parentTaskId, parentTaskId)).orderBy(asc(tasks.createdAt)).all();
   }
 
   /** Idempotent: a retried job re-entering an already running task is a no-op. */

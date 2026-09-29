@@ -12,6 +12,7 @@ import {
   type AspectRatio,
   type ImageGenerationProvider,
   type ImageGenerationRequest,
+  type MediaCapabilities,
   type MediaGenerationResult,
   type MediaProviderStatus,
   type VideoGenerationProvider,
@@ -25,6 +26,9 @@ export interface ComfyUIOptions {
   workflowPath: string | undefined;
   timeoutMs: number;
   pollMs?: number;
+  /** Longest clip the video workflow is expected to produce (seconds). */
+  maxVideoSeconds?: number;
+  fps?: number;
 }
 
 const MIME: Record<string, string> = {
@@ -44,7 +48,11 @@ const MIME: Record<string, string> = {
  * LoRAs and sampler — is the operator's choice; nothing is hard-coded here.
  *
  * Placeholders: {{POSITIVE_PROMPT}} {{NEGATIVE_PROMPT}} {{WIDTH}} {{HEIGHT}}
- * {{SEED}} {{FILENAME_PREFIX}} and, for video, {{DURATION_SECONDS}} {{FRAMES}}.
+ * {{SEED}} {{FILENAME_PREFIX}}; image workflows may add {{REFERENCE_IMAGE}}
+ * (identity conditioning, e.g. IP-Adapter/PuLID — the operator's choice);
+ * video workflows add {{DURATION_SECONDS}} {{FRAMES}} {{FPS}} and may add
+ * {{SOURCE_IMAGE}} (image-to-video). Capabilities are derived from which
+ * placeholders the workflow contains, so routing matches what it can do.
  */
 abstract class ComfyUIWorkflowProvider {
   abstract readonly id: string;
@@ -59,8 +67,35 @@ abstract class ComfyUIWorkflowProvider {
     this.client = options.url ? new ComfyUIClient(options.url) : null;
   }
 
-  supportedAspectRatios(): AspectRatio[] {
-    return ['9:16', '4:5', '1:1', '16:9'];
+  capabilities(): MediaCapabilities {
+    const text = this.workflowText() ?? '';
+    return {
+      aspectRatios: ['9:16', '4:5', '1:1', '16:9'] as AspectRatio[],
+      maxDurationSeconds: this.mediaKind === 'VIDEO' ? this.options.maxVideoSeconds ?? 10 : null,
+      imageToVideo: this.mediaKind === 'VIDEO' && text.includes('{{SOURCE_IMAGE}}'),
+      referenceImages: this.mediaKind === 'IMAGE' && text.includes('{{REFERENCE_IMAGE}}'),
+      languages: null,
+      outputFormats: this.mediaKind === 'VIDEO' ? ['.mp4', '.webm', '.gif'] : ['.png', '.jpg', '.webp'],
+    };
+  }
+
+  protected workflowText(): string | null {
+    const configured = this.options.workflowPath;
+    if (!configured) return null;
+    const path = resolveFromRoot(configured);
+    try {
+      return existsSync(path) ? readFileSync(path, 'utf8') : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Uploads a validated local image (media store or reference dir) and returns its ComfyUI name. */
+  protected async upload(path: string): Promise<string> {
+    if (!this.store.isReadableInput(path)) {
+      throw new ProviderError(this.id, `refusing to upload ${path}: not inside the media or reference directory`, { retryable: false });
+    }
+    return this.client!.uploadImage(path);
   }
 
   supportedModels(): string[] {
@@ -146,6 +181,14 @@ export class ComfyUIImageProvider extends ComfyUIWorkflowProvider implements Ima
 
   async generateImage(request: ImageGenerationRequest): Promise<MediaGenerationResult> {
     const size = ASPECT_RATIO_SIZES[request.aspectRatio];
+    const extra: Record<string, string> = {};
+    if (this.capabilities().referenceImages) {
+      const [reference] = request.referenceImages;
+      if (!reference) {
+        throw new ProviderError(this.id, 'workflow uses {{REFERENCE_IMAGE}} but no approved reference image is set in the visual identity', { retryable: false });
+      }
+      extra.REFERENCE_IMAGE = await this.upload(reference);
+    }
     const result = await this.run(
       request.productionId,
       request.assetId,
@@ -156,6 +199,7 @@ export class ComfyUIImageProvider extends ComfyUIWorkflowProvider implements Ima
         HEIGHT: size.height,
         SEED: request.seed ?? Math.floor(Math.random() * 2 ** 31),
         FILENAME_PREFIX: `jovi_${request.assetId}`,
+        ...extra,
       },
       '.png',
     );
@@ -166,16 +210,19 @@ export class ComfyUIImageProvider extends ComfyUIWorkflowProvider implements Ima
 export class ComfyUIVideoProvider extends ComfyUIWorkflowProvider implements VideoGenerationProvider {
   readonly id = 'comfyui-video';
   readonly mediaKind = 'VIDEO' as const;
-  /** Text-to-video workflows only in this build (source-image upload not implemented). */
-  readonly supportsImageToVideo = false;
-
   protected workflowVariable(): string {
     return 'COMFYUI_VIDEO_WORKFLOW';
   }
 
   async generateVideo(request: VideoGenerationRequest): Promise<MediaGenerationResult> {
     const size = ASPECT_RATIO_SIZES[request.aspectRatio];
-    const fps = 16;
+    const fps = this.options.fps ?? 16;
+    const extra: Record<string, string> = {};
+    if (this.capabilities().imageToVideo) {
+      const [source] = request.sourceImages;
+      if (!source) throw new ProviderError(this.id, 'image-to-video workflow ({{SOURCE_IMAGE}}) needs a completed source image for this scene', { retryable: false });
+      extra.SOURCE_IMAGE = await this.upload(source.location);
+    }
     const result = await this.run(
       request.productionId,
       request.assetId,
@@ -188,6 +235,8 @@ export class ComfyUIVideoProvider extends ComfyUIWorkflowProvider implements Vid
         FILENAME_PREFIX: `jovi_${request.assetId}`,
         DURATION_SECONDS: request.durationSeconds,
         FRAMES: Math.max(1, Math.round(request.durationSeconds * fps)),
+        FPS: fps,
+        ...extra,
       },
       '.mp4',
     );

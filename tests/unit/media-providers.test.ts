@@ -130,7 +130,7 @@ describe('ComfyUI adapter (against a fake ComfyUI HTTP server — not a real Com
       { url: comfy.url, workflowPath: writeWorkflow({ ...TEST_WORKFLOW, '10': { inputs: { frames: '{{FRAMES}}', seconds: '{{DURATION_SECONDS}}' } } }), timeoutMs: 5000, pollMs: 5 },
       new MediaStore(dir),
     );
-    expect(provider.supportsImageToVideo).toBe(false);
+    expect(provider.capabilities().imageToVideo).toBe(false);
     const result = await provider.generateVideo({ ...ids(), sceneId: 'sc1', prompt: 'p', negativePrompt: 'n', aspectRatio: '9:16', durationSeconds: 3, sourceImages: [] });
     expect(result.durationSeconds).toBe(3);
     expect((comfy.prompts[0]!.prompt['10'] as { inputs: Record<string, number> }).inputs).toEqual({ frames: 48, seconds: 3 });
@@ -164,21 +164,28 @@ describe('MediaProviderRegistry', () => {
     expect((await registry.select('VOICE')).reason).toMatch(/^PROVIDER_NOT_CONFIGURED/);
 
     registry.register(new GoogleFlowVideoProvider());
-    registry.register(new TestVideoProvider(store, { available: false }));
+    registry.register(new TestVideoProvider(store, { available: false }, 'test-video-offline'));
     const none = await registry.select('VIDEO', '9:16');
     expect(none.provider).toBeNull();
     expect(none.reason).toMatch(/^NO_AVAILABLE_VIDEO_PROVIDER/);
     expect(none.reason).toMatch(/google-flow: NOT_INTEGRATED/);
-    expect(none.reason).toMatch(/test-video: UNREACHABLE/);
+    expect(none.reason).toMatch(/test-video-offline: UNREACHABLE/);
 
     registry.register(new TestVideoProvider(store));
     expect((await registry.select('VIDEO', '9:16')).provider?.id).toBe('test-video');
   });
 
-  it('configured providers: ComfyUI + Flow slot in production, simulated only in simulation mode, no voice/render engine', () => {
+  it('configured providers: every media kind has real adapters in production, simulated only in simulation mode', () => {
     const store = new MediaStore(dir);
     const prod = createMediaProvidersFromConfig(loadConfig({ LM_STUDIO_ENABLED: 'false' }), store);
-    expect(prod.map((p) => `${p.id}:${p.mediaKind}:${p.kind}`)).toEqual(['comfyui-image:IMAGE:LOCAL', 'comfyui-video:VIDEO:LOCAL', 'google-flow:VIDEO:CLOUD']);
+    expect(prod.map((p) => `${p.id}:${p.mediaKind}:${p.kind}`)).toEqual([
+      'comfyui-image:IMAGE:LOCAL',
+      'comfyui-video:VIDEO:LOCAL',
+      'google-flow:VIDEO:CLOUD',
+      'macos-say:VOICE:LOCAL',
+      'elevenlabs:VOICE:CLOUD',
+      'ffmpeg-render:RENDER:LOCAL',
+    ]);
     const sim = createMediaProvidersFromConfig(loadConfig({ JOVI_SIMULATION_MODE: 'true' }), store);
     expect(sim.every((p) => p.kind === 'MOCK')).toBe(true);
     expect(sim.map((p) => p.mediaKind).sort()).toEqual(['IMAGE', 'RENDER', 'VIDEO', 'VOICE']);

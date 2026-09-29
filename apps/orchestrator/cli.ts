@@ -1,10 +1,13 @@
+import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { createJoviCore, type JoviCore } from '../../src/core/bootstrap.js';
 import { loadConfig } from '../../src/core/config/config.js';
 import { loadEnvFile } from '../../src/core/config/load-env.js';
 import { createLogger } from '../../src/core/config/logger.js';
 import type { GoalExecutionResult } from '../../src/core/orchestrator/orchestrator.js';
-import { RoutingTier } from '../../src/types/enums.js';
+import { VisualIdentityVersionInputSchema } from '../../src/core/identity/visual-identity.js';
+import { newId } from '../../src/core/ids.js';
+import { MediaKind, RoutingTier } from '../../src/types/enums.js';
 
 const USAGE = `Jovi Core v0.1 CLI
 
@@ -22,6 +25,11 @@ Usage:
   npm run jovi -- --production <productionId>          Show a production's status, assets and QA
   npm run jovi -- --decide <productionId> --decision APPROVE|REJECT --reviewer "<name>" [--acknowledge-warnings]
                                             Record a HUMAN approval decision (never publishes)
+  npm run jovi -- --regenerate-media <productionId> --requested-by "<name>" [--kinds IMAGE,VIDEO,VOICE] [--include-completed]
+                                            HUMAN request: regenerate media (script/storyboard/prompts reused), re-edit, re-QA
+  npm run jovi -- --visual-identity         Show Jovi's active visual identity and its versions
+  npm run jovi -- --set-visual-identity <profile.json> --approved-by "<name>" --summary "<why>"
+                                            HUMAN action: record a new visual identity version (LOCKED when all anchors are set)
   npm run jovi -- --simulate ...            SIMULATION: canned mock output + simulated media only
 
 Configuration is read from the environment and .env (see .env.example).
@@ -48,6 +56,14 @@ async function main(): Promise<number> {
       decision: { type: 'string' },
       reviewer: { type: 'string' },
       'acknowledge-warnings': { type: 'boolean', default: false },
+      'regenerate-media': { type: 'string' },
+      'requested-by': { type: 'string' },
+      kinds: { type: 'string' },
+      'include-completed': { type: 'boolean', default: false },
+      'visual-identity': { type: 'boolean', default: false },
+      'set-visual-identity': { type: 'string' },
+      'approved-by': { type: 'string' },
+      summary: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -68,6 +84,32 @@ async function main(): Promise<number> {
     if (values.identity) {
       process.stdout.write(`${JSON.stringify(core.identity.getActive(), null, 2)}\n`);
       return 0;
+    }
+
+    if (values['visual-identity']) {
+      process.stdout.write(`${JSON.stringify({ active: core.visualIdentity.getActive(), versions: core.visualIdentity.listVersions() }, null, 2)}\n`);
+      return 0;
+    }
+    if (values['set-visual-identity']) {
+      const input = VisualIdentityVersionInputSchema.parse({
+        profile: JSON.parse(readFileSync(values['set-visual-identity'], 'utf8')) as unknown,
+        approvedBy: values['approved-by'] ?? '',
+        changeSummary: values.summary ?? '',
+      });
+      const active = core.visualIdentity.createVersion(input.profile, input.approvedBy, input.changeSummary);
+      core.events.scope(newId('correlation')).emit('VISUAL_IDENTITY_VERSION_CREATED', 'cli', null, { version: active.version, status: active.status, approvedBy: input.approvedBy });
+      process.stdout.write(`Visual identity v${active.version} recorded: ${active.status}${active.unlockedFields.length ? ` (unlocked: ${active.unlockedFields.join(', ')})` : ''}\n`);
+      return 0;
+    }
+    if (values['regenerate-media']) {
+      const kinds = values.kinds ? values.kinds.split(',').map((k) => MediaKind.parse(k.trim().toUpperCase())) : undefined;
+      const result = await core.production.regenerateMedia(values['regenerate-media'], {
+        requestedBy: values['requested-by'] ?? '',
+        ...(kinds ? { kinds: kinds as Array<'IMAGE' | 'VIDEO' | 'VOICE'> } : {}),
+        includeCompleted: values['include-completed'],
+      });
+      printProduction(result, values.json);
+      return result.status === 'COMPLETED' ? 0 : 1;
     }
 
     if (values.production) {
@@ -157,9 +199,16 @@ async function printProviders(core: JoviCore): Promise<number> {
   }
   const media = await core.mediaProviders.statuses();
   process.stdout.write(`\nMedia providers${core.mediaProviders.isSimulation() ? ' (SIMULATION MODE)' : ''}\n`);
+  const byId = new Map(core.mediaProviders.list().map((p) => [p.id, p]));
   for (const m of media) {
-    process.stdout.write(`  ${m.available ? '●' : '○'} ${m.provider.padEnd(16)} ${m.mediaKind.padEnd(6)} ${m.state.padEnd(15)} ${m.reason}\n`);
+    process.stdout.write(`  ${m.available ? '●' : '○'} ${m.provider.padEnd(16)} ${m.mediaKind.padEnd(6)} ${m.kind.padEnd(5)} ${m.state.padEnd(15)} ${m.reason}\n`);
+    const caps = byId.get(m.provider)?.capabilities();
+    if (caps && m.available) {
+      const flags = [caps.imageToVideo ? 'image-to-video' : null, caps.referenceImages ? 'reference-images' : null, caps.maxDurationSeconds ? `max ${caps.maxDurationSeconds}s` : null, caps.languages ? `lang ${caps.languages.join('/')}` : null].filter(Boolean);
+      process.stdout.write(`      capabilities: ${caps.aspectRatios.join(' ')}${flags.length ? ` · ${flags.join(' · ')}` : ''}\n`);
+    }
   }
+  if (core.config.media.providerPreference.length) process.stdout.write(`  preference: ${core.config.media.providerPreference.join(' > ')}\n`);
   for (const kind of ['IMAGE', 'VIDEO', 'VOICE', 'RENDER'] as const) {
     if (!media.some((m) => m.mediaKind === kind)) process.stdout.write(`  ○ ${'(none)'.padEnd(16)} ${kind.padEnd(6)} NOT_CONFIGURED  no ${kind.toLowerCase()} provider is registered\n`);
   }
@@ -175,11 +224,11 @@ function printProduction(r: ReturnType<JoviCore['production']['getResult']>, jso
   const out: string[] = [''];
   if (r.simulated) out.push('*** SIMULATION — canned text and simulated media, NOT real generation ***');
   out.push(`Creative production — task ${r.status} · production ${r.productionStatus ?? '-'} · QA ${r.qaStatus ?? '-'}`);
-  out.push(`  production ${r.productionId ?? '-'} · task ${r.taskId ?? '-'} · attempts ${r.attempts}`);
+  out.push(`  production ${r.productionId ?? '-'} · task ${r.taskId ?? '-'} · attempts ${r.attempts}${r.regenerations ? ` · media regenerations ${r.regenerations}` : ''}`);
   if (r.source) out.push(`  idea ${r.source.ideaId} "${r.source.ideaTitle}" (${r.source.type}${r.source.planningTaskId ? ` from ${r.source.planningTaskId}` : ''})`);
   out.push(`  artifacts: ${Object.entries(r.artifacts).map(([k, v]) => `${k}${v ? '✓' : '✗'}`).join(' ')}`);
   out.push('  assets:');
-  for (const a of r.assets) out.push(`    - ${a.kind.padEnd(6)} ${String(a.sceneId ?? '-').padEnd(5)} ${a.status.padEnd(10)} ${a.provider ?? '-'}${a.reason ? ` — ${a.reason}` : ''}`);
+  for (const a of r.assets.filter((x) => x.status !== 'SUPERSEDED')) out.push(`    - ${a.kind.padEnd(6)} ${String(a.sceneId ?? '-').padEnd(5)} ${a.status.padEnd(10)} ${a.provider ?? '-'}${a.reason ? ` — ${a.reason}` : ''}`);
   if (r.qa) {
     out.push(`  QA: ${r.qa.status} → ${r.qa.recommendedAction}`);
     for (const fix of r.qa.requiredFixes) out.push(`    • ${fix}`);

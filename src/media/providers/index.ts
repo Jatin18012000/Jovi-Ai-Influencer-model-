@@ -2,16 +2,22 @@ import type { JoviConfig } from '../../core/config/config.js';
 import type { MediaStore } from '../media-store.js';
 import type { AnyMediaProvider } from '../types.js';
 import { ComfyUIImageProvider, ComfyUIVideoProvider } from './comfyui-providers.js';
+import { FFmpegRenderProvider } from './ffmpeg-render-provider.js';
 import { SimulatedImageProvider, SimulatedRenderProvider, SimulatedVideoProvider, SimulatedVoiceProvider } from './simulated-providers.js';
 import { GoogleFlowVideoProvider } from './unintegrated-providers.js';
+import { ElevenLabsVoiceProvider, MacOSSayVoiceProvider } from './voice-providers.js';
 
 /**
- * Media providers from configuration.
+ * Media providers from configuration. Every real provider is registered but
+ * reports NOT_CONFIGURED until the operator configures it:
  *
- * Production: ComfyUI image + video (report NOT_CONFIGURED until COMFYUI_URL
- * and a workflow are set) and the Google Flow slot (NOT_INTEGRATED). No voice
- * or editing/render provider exists yet, so those kinds have none registered
- * and their assets are BLOCKED with PROVIDER_NOT_CONFIGURED.
+ *   IMAGE   comfyui-image (LOCAL)            COMFYUI_URL + COMFYUI_IMAGE_WORKFLOW
+ *   VIDEO   comfyui-video (LOCAL)            COMFYUI_URL + COMFYUI_VIDEO_WORKFLOW
+ *           google-flow (CLOUD)              NOT_INTEGRATED (no executable API)
+ *   VOICE   macos-say (LOCAL)                MACOS_SAY_VOICE (macOS only)
+ *           elevenlabs (CLOUD)               ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID
+ *   RENDER  ffmpeg-render (LOCAL)            JOVI_FFMPEG_PATH
+ *
  * Simulation mode: ONLY simulated providers (never mixed with real ones).
  */
 export function createMediaProvidersFromConfig(config: JoviConfig, store: MediaStore): AnyMediaProvider[] {
@@ -23,5 +29,8 @@ export function createMediaProvidersFromConfig(config: JoviConfig, store: MediaS
     new ComfyUIImageProvider({ url: m.comfyuiUrl, workflowPath: m.comfyuiImageWorkflow, timeoutMs: m.comfyuiTimeoutMs }, store),
     new ComfyUIVideoProvider({ url: m.comfyuiUrl, workflowPath: m.comfyuiVideoWorkflow, timeoutMs: m.comfyuiTimeoutMs }, store),
     new GoogleFlowVideoProvider(),
+    new MacOSSayVoiceProvider({ sayPath: m.sayPath, voice: m.sayVoice, timeoutMs: m.voiceTimeoutMs }, store),
+    new ElevenLabsVoiceProvider({ ...m.elevenlabs, timeoutMs: m.voiceTimeoutMs }, store),
+    new FFmpegRenderProvider({ ffmpegPath: m.ffmpegPath, timeoutMs: m.ffmpegTimeoutMs }, store),
   ];
 }

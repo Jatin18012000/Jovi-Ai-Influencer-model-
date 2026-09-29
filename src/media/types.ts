@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { MediaKind, ProviderKind } from '../types/enums.js';
+import type { MediaKind, PrivacyRequirement, ProviderKind } from '../types/enums.js';
 import type { CostEstimate } from '../models/types.js';
 
 export const AspectRatio = z.enum(['9:16', '4:5', '1:1', '16:9']);
@@ -51,6 +51,53 @@ export interface MediaGenerationResult {
   metadata: Record<string, unknown>;
 }
 
+/**
+ * What a provider can do. Simulated, fake and real providers all declare the
+ * same structure, and the registry matches requests against it — no provider
+ * is selected by name inside agents or the pipeline.
+ */
+export interface MediaCapabilities {
+  aspectRatios: AspectRatio[];
+  /** Longest single output in seconds (video/voice/render); null = no stated limit. */
+  maxDurationSeconds: number | null;
+  /** Video: animates a source image (identity conditioning). */
+  imageToVideo: boolean;
+  /** Image: accepts reference images of Jovi (identity conditioning). */
+  referenceImages: boolean;
+  /** Voice: BCP-47 language prefixes supported (e.g. "en"); null = any. */
+  languages: string[] | null;
+  /** File extensions the provider produces (e.g. ".png", ".wav"). */
+  outputFormats: string[];
+}
+
+/** Hard requirements a provider must meet for one asset request. */
+export interface MediaRequirements {
+  aspectRatio?: AspectRatio;
+  durationSeconds?: number;
+  language?: string;
+  /** LOCAL_ONLY excludes CLOUD providers (same rule as the model router). */
+  privacy?: PrivacyRequirement;
+}
+
+/** Soft preferences: capable providers that satisfy them are tried first. */
+export interface MediaPreferences {
+  imageToVideo?: boolean;
+  referenceImages?: boolean;
+}
+
+/** Returns why a provider cannot serve the requirements, or null if it can. */
+export function capabilityMismatch(kind: ProviderKind, caps: MediaCapabilities, req: MediaRequirements): string | null {
+  if (req.privacy === 'LOCAL_ONLY' && kind === 'CLOUD') return 'privacy LOCAL_ONLY excludes cloud providers';
+  if (req.aspectRatio && !caps.aspectRatios.includes(req.aspectRatio)) return `aspect ratio ${req.aspectRatio} not supported`;
+  if (req.durationSeconds !== undefined && caps.maxDurationSeconds !== null && req.durationSeconds > caps.maxDurationSeconds) {
+    return `duration ${req.durationSeconds}s exceeds provider maximum ${caps.maxDurationSeconds}s`;
+  }
+  if (req.language && caps.languages && !caps.languages.some((l) => req.language!.toLowerCase().startsWith(l.toLowerCase()))) {
+    return `language ${req.language} not supported`;
+  }
+  return null;
+}
+
 export interface MediaProviderBase {
   readonly id: string;
   readonly kind: ProviderKind;
@@ -58,7 +105,7 @@ export interface MediaProviderBase {
   /** Must never throw: unavailable providers report a non-AVAILABLE state. */
   inspectAvailability(): Promise<MediaProviderStatus>;
   supportedModels(): string[];
-  supportedAspectRatios(): AspectRatio[];
+  capabilities(): MediaCapabilities;
   estimateCost(request: unknown): CostEstimate;
 }
 
@@ -92,8 +139,6 @@ export interface VideoGenerationRequest {
 
 export interface VideoGenerationProvider extends MediaProviderBase {
   readonly mediaKind: 'VIDEO';
-  /** True when the provider animates source images (identity consistency via image conditioning). */
-  readonly supportsImageToVideo: boolean;
   generateVideo(request: VideoGenerationRequest): Promise<MediaGenerationResult>;
 }
 

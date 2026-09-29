@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { basename } from 'node:path';
 import { ProviderError } from '../../core/errors.js';
 import { getJson, postJson } from '../../models/providers/http.js';
 
@@ -21,6 +23,7 @@ export interface ComfyUIHistoryEntry {
  *   POST /prompt                 queue an API-format workflow → prompt_id
  *   GET  /history/{prompt_id}    completion status + output files
  *   GET  /view?filename&subfolder&type   download an output file
+ *   POST /upload/image           upload a reference/source image (multipart)
  * It only talks to the configured ComfyUI URL and never installs models.
  */
 export class ComfyUIClient {
@@ -67,6 +70,28 @@ export class ComfyUIClient {
       if (Date.now() >= deadline) throw new ProviderError(PROVIDER, `generation did not finish within ${timeoutMs}ms`, { retryable: true });
       await new Promise((r) => setTimeout(r, pollMs));
     }
+  }
+
+  /**
+   * Uploads a local image into ComfyUI's input folder and returns the name a
+   * LoadImage node expects ("subfolder/name"). Callers validate the path.
+   */
+  async uploadImage(path: string, timeoutMs = 60_000): Promise<string> {
+    const form = new FormData();
+    form.append('image', new Blob([readFileSync(path)]), basename(path));
+    form.append('type', 'input');
+    form.append('subfolder', 'jovi');
+    form.append('overwrite', 'true');
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/upload/image`, { method: 'POST', body: form, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (error) {
+      throw new ProviderError(PROVIDER, `upload failed: ${(error as Error).message}`, { retryable: true, cause: error });
+    }
+    if (!response.ok) throw new ProviderError(PROVIDER, `upload HTTP ${response.status}`, { retryable: response.status >= 500, status: response.status });
+    const data = (await response.json()) as { name?: string; subfolder?: string };
+    if (!data.name) throw new ProviderError(PROVIDER, 'upload returned no file name', { retryable: false });
+    return data.subfolder ? `${data.subfolder}/${data.name}` : data.name;
   }
 
   async download(file: ComfyUIOutputFile, timeoutMs = 60_000): Promise<Buffer> {

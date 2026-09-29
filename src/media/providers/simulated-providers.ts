@@ -7,6 +7,7 @@ import {
   type EditingRenderProvider,
   type ImageGenerationProvider,
   type ImageGenerationRequest,
+  type MediaCapabilities,
   type MediaGenerationResult,
   type MediaProviderStatus,
   type RenderRequest,
@@ -44,8 +45,16 @@ abstract class SimulatedMediaProvider {
     return ['simulation'];
   }
 
-  supportedAspectRatios(): AspectRatio[] {
-    return ['9:16', '4:5', '1:1', '16:9'];
+  /** Same capability contract as real providers; simulation claims no limits. */
+  capabilities(): MediaCapabilities {
+    return {
+      aspectRatios: ['9:16', '4:5', '1:1', '16:9'] as AspectRatio[],
+      maxDurationSeconds: null,
+      imageToVideo: this.mediaKind === 'VIDEO',
+      referenceImages: this.mediaKind === 'IMAGE',
+      languages: null,
+      outputFormats: [],
+    };
   }
 
   estimateCost() {
@@ -77,7 +86,6 @@ export class SimulatedImageProvider extends SimulatedMediaProvider implements Im
 export class SimulatedVideoProvider extends SimulatedMediaProvider implements VideoGenerationProvider {
   readonly id = 'simulated-video';
   readonly mediaKind = 'VIDEO' as const;
-  readonly supportsImageToVideo = true;
   async generateVideo(request: VideoGenerationRequest) {
     return this.simulate(request.assetId, { ...ASPECT_RATIO_SIZES[request.aspectRatio], durationSeconds: request.durationSeconds });
   }

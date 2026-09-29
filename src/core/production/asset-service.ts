@@ -15,12 +15,16 @@ export const ASSET_TRANSITIONS: Record<AssetStatus, AssetStatus[]> = {
   REQUESTED: ['QUEUED', 'BLOCKED', 'FAILED', 'REJECTED'],
   QUEUED: ['GENERATING', 'BLOCKED', 'FAILED', 'REJECTED'],
   GENERATING: ['COMPLETED', 'SIMULATED', 'FAILED'],
-  COMPLETED: ['REJECTED'],
-  SIMULATED: ['REJECTED'],
-  FAILED: ['REJECTED'],
-  BLOCKED: ['REJECTED'],
+  COMPLETED: ['REJECTED', 'SUPERSEDED'],
+  SIMULATED: ['REJECTED', 'SUPERSEDED'],
+  FAILED: ['REJECTED', 'SUPERSEDED'],
+  BLOCKED: ['REJECTED', 'SUPERSEDED'],
   REJECTED: [],
+  SUPERSEDED: [],
 };
+
+/** Assets that no longer count toward a production (audit trail only). */
+export const INACTIVE_ASSET_STATUSES: readonly AssetStatus[] = ['REJECTED', 'SUPERSEDED'];
 
 const REQUESTED_EVENT: Record<MediaKind, EventType> = {
   IMAGE: 'IMAGE_GENERATION_REQUESTED',
@@ -107,6 +111,22 @@ export class AssetService {
     else if (to === 'FAILED') scope.emit('ASSET_GENERATION_FAILED', SOURCE, id, payload);
     else if (to === 'BLOCKED') scope.emit('ASSET_BLOCKED', SOURCE, id, payload);
     else if (to === 'REJECTED') scope.emit('ASSET_REJECTED', SOURCE, id, payload);
+    else if (to === 'SUPERSEDED') scope.emit('ASSET_SUPERSEDED', SOURCE, id, payload);
+    return this.get(id);
+  }
+
+  /**
+   * Updates bookkeeping fields of an asset that is still GENERATING (e.g. the
+   * provider changed after a fallback). Never changes status or location.
+   */
+  annotate(id: string, fields: Pick<Partial<MediaAsset>, 'provider' | 'providerKind' | 'model' | 'cost' | 'attempts' | 'metadata' | 'statusReason'>): MediaAsset {
+    const asset = this.get(id);
+    if (asset.status !== 'GENERATING') throw new ValidationError(`Asset ${id} is ${asset.status}; only GENERATING assets can be annotated`);
+    this.db
+      .update(mediaAssets)
+      .set({ ...fields, updatedAt: nowIso() })
+      .where(eq(mediaAssets.id, id))
+      .run();
     return this.get(id);
   }
 
@@ -119,5 +139,10 @@ export class AssetService {
   list(productionId: string, kind?: MediaKind): MediaAsset[] {
     const rows = this.db.select().from(mediaAssets).where(eq(mediaAssets.productionId, productionId)).orderBy(asc(mediaAssets.createdAt)).all();
     return kind ? rows.filter((r) => r.kind === kind) : rows;
+  }
+
+  /** Assets that still count (not rejected or superseded). */
+  listActive(productionId: string, kind?: MediaKind): MediaAsset[] {
+    return this.list(productionId, kind).filter((a) => !INACTIVE_ASSET_STATUSES.includes(a.status as AssetStatus));
   }
 }

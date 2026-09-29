@@ -95,6 +95,26 @@ const EnvSchema = z.object({
   JOVI_MEDIA_DIR: z.string().default('data/media'),
   JOVI_MEDIA_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(2),
 
+  /** Phase 9 media. Every real provider is opt-in: unset = NOT_CONFIGURED. */
+  /** Comma-separated media provider ids tried first (e.g. "comfyui-image,macos-say"). */
+  JOVI_MEDIA_PROVIDER_PREFERENCE: z.string().default(''),
+  /** Human-approved reference images (e.g. Jovi's reference sheet) live here. */
+  JOVI_REFERENCE_DIR: z.string().default('data/references'),
+  /** ffmpeg render engine, e.g. /opt/homebrew/bin/ffmpeg or "ffmpeg". */
+  JOVI_FFMPEG_PATH: optionalString,
+  /** Optional ffprobe for measuring durations/dimensions of generated media. */
+  JOVI_FFPROBE_PATH: optionalString,
+  JOVI_FFMPEG_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
+  /** macOS `say` voice (a human-approved system voice name, e.g. "Serena"). */
+  MACOS_SAY_VOICE: optionalString,
+  MACOS_SAY_PATH: z.string().default('/usr/bin/say'),
+  ELEVENLABS_API_KEY: optionalSecret,
+  /** Human-approved ElevenLabs voice id for Jovi. */
+  ELEVENLABS_VOICE_ID: optionalString,
+  ELEVENLABS_MODEL: z.string().default('eleven_multilingual_v2'),
+  ELEVENLABS_BASE_URL: z.string().url().default('https://api.elevenlabs.io'),
+  JOVI_VOICE_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+
   JOVI_LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 });
 
@@ -144,6 +164,15 @@ export type JoviConfig = {
     comfyuiTimeoutMs: number;
     dir: string;
     maxAttempts: number;
+    providerPreference: string[];
+    referenceDir: string;
+    ffmpegPath: string | undefined;
+    ffprobePath: string | undefined;
+    ffmpegTimeoutMs: number;
+    sayVoice: string | undefined;
+    sayPath: string;
+    elevenlabs: { apiKey: string | undefined; voiceId: string | undefined; model: string; baseUrl: string };
+    voiceTimeoutMs: number;
   };
   logLevel: z.infer<typeof EnvSchema>['JOVI_LOG_LEVEL'];
   /** Human-readable configuration warnings (e.g. obsolete variables). */
@@ -201,6 +230,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
       comfyuiTimeoutMs: parsed.COMFYUI_TIMEOUT_MS,
       dir: parsed.JOVI_MEDIA_DIR,
       maxAttempts: parsed.JOVI_MEDIA_MAX_ATTEMPTS,
+      providerPreference: parsed.JOVI_MEDIA_PROVIDER_PREFERENCE.split(',')
+        .map((p) => p.trim())
+        .filter(Boolean),
+      referenceDir: parsed.JOVI_REFERENCE_DIR,
+      ffmpegPath: parsed.JOVI_FFMPEG_PATH,
+      ffprobePath: parsed.JOVI_FFPROBE_PATH,
+      ffmpegTimeoutMs: parsed.JOVI_FFMPEG_TIMEOUT_MS,
+      sayVoice: parsed.MACOS_SAY_VOICE,
+      sayPath: parsed.MACOS_SAY_PATH,
+      elevenlabs: { apiKey: parsed.ELEVENLABS_API_KEY, voiceId: parsed.ELEVENLABS_VOICE_ID, model: parsed.ELEVENLABS_MODEL, baseUrl: parsed.ELEVENLABS_BASE_URL },
+      voiceTimeoutMs: parsed.JOVI_VOICE_TIMEOUT_MS,
     },
     logLevel: parsed.JOVI_LOG_LEVEL,
     warnings,
@@ -220,5 +260,6 @@ export function redactConfig(config: JoviConfig): Record<string, unknown> {
       lmstudio: { ...config.providers.lmstudio, apiKey: mask(config.providers.lmstudio.apiKey) },
     },
     api: { ...config.api, token: mask(config.api.token) },
+    media: { ...config.media, elevenlabs: { ...config.media.elevenlabs, apiKey: mask(config.media.elevenlabs.apiKey) } },
   };
 }

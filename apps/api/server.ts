@@ -13,7 +13,8 @@ import { EvaluableOptionSchema } from '../../src/models/evaluator/rule-checks.js
 import { EventType, MemoryType } from '../../src/types/enums.js';
 import { ExpensiveCallLimiter } from './security.js';
 import { ProductionRequestSchema } from '../../src/agents/production/production-pipeline.js';
-import { HumanDecisionSchema, type ArtifactKind } from '../../src/core/production/production-service.js';
+import { HumanDecisionSchema, MediaRegenerationSchema, type ArtifactKind } from '../../src/core/production/production-service.js';
+import { VisualIdentityVersionInputSchema } from '../../src/core/identity/visual-identity.js';
 
 const IdParams = z.object({ id: z.string().min(1).max(100) });
 
@@ -105,7 +106,7 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
       status: 'ok',
       service: 'jovi-core',
       version: '0.1.0',
-      phase: 8,
+      phase: 9,
       database: 'ok',
       simulationMode: core.providers.isSimulation(),
       providers: statuses.map((s) => ({ provider: s.provider, kind: s.kind, available: s.available, model: s.selectedModel, reason: s.reason })),
@@ -204,10 +205,41 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
     return { production: updated, publishingGate: core.productions.publishingGate(id) };
   });
 
-  app.get('/api/media/providers', async () => ({
-    simulationMode: core.mediaProviders.isSimulation(),
-    providers: await core.mediaProviders.statuses(),
-  }));
+  /**
+   * HUMAN/operator action: regenerate media for a BLOCKED or AWAITING_HUMAN_APPROVAL
+   * production (text stages are reused). Ends again at the approval boundary.
+   */
+  app.post('/api/productions/:id/regenerate-media', async (request, reply) => {
+    const { id } = IdParams.parse(request.params);
+    const body = MediaRegenerationSchema.extend({ mode: z.enum(['sync', 'async']).default('sync') }).parse(request.body ?? {});
+    const result = await guarded(request.ip, () => core.production.regenerateMedia(id, body));
+    return reply.code(body.mode === 'async' ? 202 : 200).send(result);
+  });
+
+  app.get('/api/media/providers', async () => {
+    const statuses = await core.mediaProviders.statuses();
+    const byId = new Map(core.mediaProviders.list().map((p) => [p.id, p]));
+    return {
+      simulationMode: core.mediaProviders.isSimulation(),
+      preference: core.config.media.providerPreference,
+      providers: statuses.map((s) => ({ ...s, capabilities: byId.get(s.provider)?.capabilities() ?? null })),
+    };
+  });
+
+  // --- Visual identity (read: anyone with API access; write: human approval) ---
+
+  app.get('/api/visual-identity', async () => ({ active: core.visualIdentity.getActive(), versions: core.visualIdentity.listVersions() }));
+
+  /**
+   * HUMAN action: record a new visual identity version (e.g. lock Jovi's
+   * appearance anchors and reference sheet). No agent tool can do this.
+   */
+  app.post('/api/visual-identity', async (request, reply) => {
+    const body = VisualIdentityVersionInputSchema.parse(request.body ?? {});
+    const active = core.visualIdentity.createVersion(body.profile, body.approvedBy, body.changeSummary);
+    core.events.scope(newId('correlation')).emit('VISUAL_IDENTITY_VERSION_CREATED', 'api', null, { version: active.version, status: active.status, approvedBy: body.approvedBy });
+    return reply.code(201).send({ active, versions: core.visualIdentity.listVersions() });
+  });
 
   app.get('/api/jovi/goal/:id', async (request) => {
     const { id } = IdParams.parse(request.params);

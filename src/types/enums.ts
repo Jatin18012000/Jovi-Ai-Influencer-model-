@@ -108,6 +108,11 @@ export const EventType = z.enum([
   'CREATIVE_PRODUCTION_FAILED',
   'PRODUCTION_APPROVED',
   'PRODUCTION_REJECTED',
+  // Phase 9 — real media generation
+  'MEDIA_PROVIDER_FALLBACK',
+  'ASSET_SUPERSEDED',
+  'MEDIA_REGENERATION_REQUESTED',
+  'VISUAL_IDENTITY_VERSION_CREATED',
 ]);
 
 /** Kinds of media a production can require. */
@@ -117,9 +122,10 @@ export type MediaKind = z.infer<typeof MediaKind>;
 /**
  * Media asset lifecycle. A prompt is never an asset: only a provider call that
  * returned a real, verifiable output may reach COMPLETED. SIMULATED marks
- * simulation-mode output and is never publishable.
+ * simulation-mode output and is never publishable. SUPERSEDED marks an asset
+ * replaced by a human-requested media regeneration (kept for the audit trail).
  */
-export const AssetStatus = z.enum(['REQUESTED', 'QUEUED', 'GENERATING', 'COMPLETED', 'SIMULATED', 'FAILED', 'BLOCKED', 'REJECTED']);
+export const AssetStatus = z.enum(['REQUESTED', 'QUEUED', 'GENERATING', 'COMPLETED', 'SIMULATED', 'FAILED', 'BLOCKED', 'REJECTED', 'SUPERSEDED']);
 export type AssetStatus = z.infer<typeof AssetStatus>;
 
 /** Creative production lifecycle. Phase 8 ends at the human approval boundary. */

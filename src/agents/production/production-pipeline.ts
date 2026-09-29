@@ -4,12 +4,12 @@ import { ValidationError, errorMessage } from '../../core/errors.js';
 import type { EventBus } from '../../core/events/event-bus.js';
 import type { IdentityService } from '../../core/identity/identity-service.js';
 import type { VisualIdentityService } from '../../core/identity/visual-identity.js';
-import { newId } from '../../core/ids.js';
+import { newId, nowIso } from '../../core/ids.js';
 import type { Job, JobQueue } from '../../core/jobs/job-queue.js';
 import type { Task, TaskService } from '../../core/jobs/task-service.js';
 import type { AssetService, MediaAsset } from '../../core/production/asset-service.js';
 import type { MediaService } from '../../core/production/media-service.js';
-import type { ProductionService } from '../../core/production/production-service.js';
+import { MediaRegenerationSchema, type MediaRegenerationRequest, type ProductionService } from '../../core/production/production-service.js';
 import type { PublishingGateResult } from '../../core/production/publishing-gate.js';
 import type { PromptLibrary } from '../../core/prompts/prompt-library.js';
 import type { StrategyService } from '../../core/strategy/strategy-service.js';
@@ -56,12 +56,17 @@ export const ProductionRequestSchema = z
 export type ProductionRequest = z.input<typeof ProductionRequestSchema>;
 
 export interface ProductionResult {
+  /** Status of the latest task for this production (the original run or the latest media regeneration). */
   status: Task['status'];
   productionId: string | null;
   productionStatus: ProductionStatus | null;
   qaStatus: QAReport['status'] | null;
   simulated: boolean;
   taskId: string | null;
+  /** The CREATIVE_PRODUCTION task that created the production. */
+  originTaskId: string | null;
+  /** Number of human-requested media regenerations. */
+  regenerations: number;
   jobId: string | null;
   correlationId: string;
   source: { type: 'PLANNING' | 'DIRECT'; planningTaskId: string | null; ideaId: string; ideaTitle: string } | null;
@@ -128,7 +133,8 @@ export class CreativeProductionPipeline {
     deps.jobs.registerHandler(CREATIVE_PRODUCTION_JOB, {
       execute: ({ job, scope }) => this.executeJob(job, scope),
       onFinalFailure: ({ job, scope }, error) => {
-        const production = this.deps.productions.findByTask(job.taskId);
+        const { productionId } = job.payload as { productionId?: string };
+        const production = productionId ? this.deps.productions.get(productionId) : this.deps.productions.findByTask(job.taskId);
         if (production) this.deps.productions.fail(production.id, error, scope);
         const task = this.deps.tasks.find(job.taskId);
         if (task && task.status !== 'COMPLETED' && task.status !== 'CANCELLED') this.deps.tasks.fail(job.taskId, error, scope);
@@ -186,10 +192,33 @@ export class CreativeProductionPipeline {
     return this.getResult(production.id);
   }
 
+  /**
+   * Human/operator action: regenerate media for a BLOCKED or
+   * AWAITING_HUMAN_APPROVAL production without re-running the text stages
+   * (script, storyboard and prompts are reused). Runs as a new
+   * MEDIA_REGENERATION task under the production's task; editing and QA are
+   * redone, and the production again ends at the human approval boundary.
+   */
+  async regenerateMedia(productionId: string, request: MediaRegenerationRequest & { mode?: 'sync' | 'async' }): Promise<ProductionResult> {
+    const input = MediaRegenerationSchema.parse(request);
+    const production = this.deps.productions.get(productionId);
+    const scope = this.deps.events.scope(production.correlationId);
+    const since = nowIso();
+    this.deps.productions.requestMediaRegeneration(productionId, input, scope);
+    const task = this.deps.tasks.create(
+      { type: 'MEDIA_REGENERATION', goal: `Regenerate media for ${productionId}`, input: { productionId, ...input }, createdBy: input.requestedBy, parentTaskId: production.taskId },
+      scope,
+    );
+    const job = this.deps.jobs.enqueue({ taskId: task.id, type: CREATIVE_PRODUCTION_JOB, payload: { productionId, since }, reserve: request.mode !== 'async' }, scope);
+    if (request.mode !== 'async') await this.deps.jobs.run(job.id);
+    return this.getResult(productionId);
+  }
+
   /** Assembles the current state of a production from persisted records. */
   getResult(productionId: string): ProductionResult {
     const production = this.deps.productions.get(productionId);
-    const task = this.deps.tasks.get(production.taskId);
+    const regenerations = this.deps.tasks.listChildren(production.taskId).filter((t) => t.type === 'MEDIA_REGENERATION');
+    const task = regenerations.at(-1) ?? this.deps.tasks.get(production.taskId);
     const job = this.deps.jobs.listByTask(task.id).at(-1);
     const qa = this.deps.productions.latestArtifact<QAReport>(productionId, 'QA_REPORT');
     const idea = ProductionIdeaSchema.parse(production.idea);
@@ -202,6 +231,8 @@ export class CreativeProductionPipeline {
       qaStatus: (production.qaStatus as QAReport['status'] | null) ?? null,
       simulated: production.simulated || assets.some((a) => a.simulated),
       taskId: task.id,
+      originTaskId: production.taskId,
+      regenerations: regenerations.length,
       jobId: job?.id ?? null,
       correlationId: production.correlationId,
       source: { type: production.sourceType, planningTaskId: production.sourcePlanningTaskId, ideaId: idea.id, ideaTitle: idea.title },
@@ -218,7 +249,12 @@ export class CreativeProductionPipeline {
   // ---------------------------------------------------------------------------
 
   private async executeJob(job: Job, scope: ReturnType<EventBus['scope']>): Promise<unknown> {
-    const { productionId } = job.payload as { productionId: string };
+    // `since` is set for media regeneration jobs: artifacts older than it belong to the previous round.
+    const { productionId, since } = job.payload as { productionId: string; since?: string };
+    const fresh = (kind: 'EDIT_PLAN') => {
+      const at = productions.artifactCreatedAt(productionId, kind);
+      return at !== null && (!since || at >= since);
+    };
     const { productions } = this.deps;
     this.deps.tasks.start(job.taskId, scope);
     const production = productions.get(productionId);
@@ -257,13 +293,13 @@ export class CreativeProductionPipeline {
     const prompts = productions.latestArtifact<VisualPrompts>(productionId, 'VISUAL_PROMPTS')!;
 
     if (status() === 'GENERATING_ASSETS') {
-      await this.generateAssets(productionId, script, prompts, aspectRatio, run, scope);
+      await this.generateAssets(productionId, script, prompts, aspectRatio, privacy, run, scope);
       productions.advance(productionId, 'EDITING', scope);
     }
 
     if (status() === 'EDITING') {
-      if (!productions.latestArtifact(productionId, 'EDIT_PLAN')) {
-        await run<EditPlan>(this.agents.editing, { productionId, script, storyboard });
+      if (!fresh('EDIT_PLAN')) {
+        await run<EditPlan>(this.agents.editing, { productionId, script, storyboard, privacy });
       }
       productions.advance(productionId, 'QA', scope);
     }
@@ -284,28 +320,35 @@ export class CreativeProductionPipeline {
   /**
    * Image, video and voice run in parallel. When the video provider animates
    * source images, video waits for images (identity consistency); voice never
-   * depends on visuals. Kinds already generated on a previous attempt are not
-   * regenerated; assets interrupted mid-flight are marked FAILED.
+   * depends on visuals. Work is per scene/section: anything that already has a
+   * live asset (completed, simulated or blocked) is not requested again, so a
+   * retried job or a media regeneration only fills the gaps. Assets
+   * interrupted mid-flight are marked FAILED first.
    */
   private async generateAssets(
     productionId: string,
     script: Script,
     prompts: VisualPrompts,
     aspectRatio: AspectRatio,
+    privacy: ProductionContext['privacy'],
     run: <O>(agent: AnyAgent, input: unknown) => Promise<O>,
     scope: ReturnType<EventBus['scope']>,
   ): Promise<void> {
-    const existing = this.deps.assets.list(productionId);
-    for (const a of existing.filter((x) => ['REQUESTED', 'QUEUED', 'GENERATING'].includes(x.status))) {
+    for (const a of this.deps.assets.list(productionId).filter((x) => ['REQUESTED', 'QUEUED', 'GENERATING'].includes(x.status))) {
       this.deps.assets.transition(a.id, 'FAILED', { statusReason: 'interrupted: generation did not finish before a restart' }, scope);
     }
-    const done = new Set(existing.map((a: MediaAsset) => a.kind as MediaKind));
-    const image = () => (done.has('IMAGE') ? Promise.resolve() : run(this.agents.image, { productionId, prompts: prompts.prompts }));
-    const video = (useSourceImages: boolean) =>
-      done.has('VIDEO') ? Promise.resolve() : run(this.agents.video, { productionId, prompts: prompts.prompts, useSourceImages });
-    const voice = () => (done.has('VOICE') ? Promise.resolve() : run(this.agents.voice, { productionId, script }));
+    const live = this.deps.assets.listActive(productionId).filter((a: MediaAsset) => a.status !== 'FAILED');
+    const has = (kind: MediaKind, sceneId: string) => live.some((a) => a.kind === kind && a.sceneId === sceneId);
+    const imagePrompts = prompts.prompts.filter((p) => !has('IMAGE', p.sceneId));
+    const videoPrompts = prompts.prompts.filter((p) => !has('VIDEO', p.sceneId));
+    const voiceSections = script.sections.filter((s) => s.dialogue.some((d) => d.speaker === 'JOVI') && !has('VOICE', s.sectionId)).map((s) => s.sectionId);
 
-    const conditionOnImages = await this.deps.media.videoNeedsSourceImages(aspectRatio);
+    const image = () => (imagePrompts.length ? run(this.agents.image, { productionId, prompts: imagePrompts, privacy }) : Promise.resolve());
+    const video = (useSourceImages: boolean) =>
+      videoPrompts.length ? run(this.agents.video, { productionId, prompts: videoPrompts, useSourceImages, privacy }) : Promise.resolve();
+    const voice = () => (voiceSections.length ? run(this.agents.voice, { productionId, script, sectionIds: voiceSections, privacy }) : Promise.resolve());
+
+    const conditionOnImages = await this.deps.media.videoNeedsSourceImages(aspectRatio, privacy);
     await Promise.all(conditionOnImages ? [image().then(() => video(true)), voice()] : [image(), video(false), voice()]);
   }
 
@@ -357,6 +400,8 @@ export class CreativeProductionPipeline {
       qaStatus: null,
       simulated: this.deps.isSimulation(),
       taskId: null,
+      originTaskId: null,
+      regenerations: 0,
       jobId: null,
       correlationId,
       source: null,

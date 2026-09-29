@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { MediaAsset } from '../../core/production/asset-service.js';
 import { ASPECT_RATIO_SIZES, AspectRatio, type VoiceProfile } from '../../media/types.js';
-import type { MediaKind } from '../../types/enums.js';
+import { PrivacyRequirement, type MediaKind } from '../../types/enums.js';
 import type { Agent, AgentDefinition, AgentRunContext } from '../agent.js';
 import { EditPlanSchema, MediaAgentOutputSchema, ScriptSchema, StoryboardSchema, VisualPromptSceneSchema, type EditPlan, type MediaAgentOutput } from './production-schemas.js';
 
@@ -60,9 +60,13 @@ abstract class MediaAgent<I> implements Agent<I, MediaAgentOutput, NoContext> {
 // Image Generation Agent
 // ---------------------------------------------------------------------------
 
+/** Assets that still count for a production (not rejected or superseded). */
+const isActive = (a: MediaAsset) => a.status !== 'REJECTED' && a.status !== 'SUPERSEDED';
+
 export const ImageAgentInputSchema = z.object({
   productionId: z.string().min(1),
   prompts: z.array(VisualPromptSceneSchema).min(1),
+  privacy: PrivacyRequirement.default('STANDARD'),
 });
 export type ImageAgentInput = z.infer<typeof ImageAgentInputSchema>;
 
@@ -80,6 +84,9 @@ export class ImageGenerationAgent extends MediaAgent<ImageAgentInput> {
           productionId: input.productionId,
           sceneId: p.sceneId,
           aspectRatio: p.aspectRatio,
+          requirements: { privacy: input.privacy },
+          // Providers that can condition on Jovi's approved reference sheet are preferred for scenes with Jovi.
+          preferences: { referenceImages: p.featuresJovi && visual.profile.referenceImages.length > 0 },
           request: { sceneId: p.sceneId, prompt: p.imagePrompt, negativePrompt: p.negativePrompt, aspectRatio: p.aspectRatio, referenceImages: p.featuresJovi ? visual.profile.referenceImages : [] },
         }),
       );
@@ -97,6 +104,7 @@ export const VideoAgentInputSchema = z.object({
   prompts: z.array(VisualPromptSceneSchema).min(1),
   /** When true, each scene's COMPLETED image is used as the conditioning source. */
   useSourceImages: z.boolean().default(false),
+  privacy: PrivacyRequirement.default('STANDARD'),
 });
 export type VideoAgentInput = z.infer<typeof VideoAgentInputSchema>;
 
@@ -105,7 +113,7 @@ export class VideoGenerationAgent extends MediaAgent<VideoAgentInput> {
   readonly inputSchema = VideoAgentInputSchema;
 
   async execute(input: VideoAgentInput, _c: NoContext, ctx: AgentRunContext): Promise<MediaAgentOutput> {
-    const images = input.useSourceImages ? ctx.tools.production.listAssets(input.productionId, 'IMAGE') : [];
+    const images = input.useSourceImages ? ctx.tools.production.listAssets(input.productionId, 'IMAGE').filter(isActive) : [];
     const assets: MediaAsset[] = [];
     for (const p of input.prompts) {
       // Only real, completed images may condition a video; simulated/blocked ones are never passed on.
@@ -116,6 +124,8 @@ export class VideoGenerationAgent extends MediaAgent<VideoAgentInput> {
           sceneId: p.sceneId,
           aspectRatio: p.aspectRatio,
           sourceAssetIds: sources.map((s) => s.id),
+          requirements: { privacy: input.privacy, durationSeconds: p.targetDurationSeconds },
+          preferences: { imageToVideo: sources.length > 0 },
           request: {
             sceneId: p.sceneId,
             prompt: p.videoPrompt,
@@ -138,6 +148,9 @@ export class VideoGenerationAgent extends MediaAgent<VideoAgentInput> {
 export const VoiceAgentInputSchema = z.object({
   productionId: z.string().min(1),
   script: ScriptSchema,
+  /** Only these sections (resume/regeneration); default all sections with Jovi dialogue. */
+  sectionIds: z.array(z.string()).optional(),
+  privacy: PrivacyRequirement.default('STANDARD'),
 });
 export type VoiceAgentInput = z.infer<typeof VoiceAgentInputSchema>;
 
@@ -155,6 +168,7 @@ export class VoiceAgent extends MediaAgent<VoiceAgentInput> {
     };
     const assets: MediaAsset[] = [];
     for (const section of input.script.sections) {
+      if (input.sectionIds && !input.sectionIds.includes(section.sectionId)) continue;
       const lines = section.dialogue.filter((d) => d.speaker === 'JOVI');
       if (!lines.length) continue;
       const first = lines[0]!;
@@ -163,6 +177,7 @@ export class VoiceAgent extends MediaAgent<VoiceAgentInput> {
           productionId: input.productionId,
           sceneId: section.sectionId,
           aspectRatio: null,
+          requirements: { privacy: input.privacy, language: input.script.language },
           request: {
             sceneId: section.sectionId,
             text: lines.map((l) => l.line).join(' '),
@@ -186,6 +201,7 @@ export const EditingAgentInputSchema = z.object({
   productionId: z.string().min(1),
   script: ScriptSchema,
   storyboard: StoryboardSchema,
+  privacy: PrivacyRequirement.default('STANDARD'),
 });
 export type EditingAgentInput = z.infer<typeof EditingAgentInputSchema>;
 
@@ -207,7 +223,8 @@ export class EditingAgent implements Agent<EditingAgentInput, EditPlan, null> {
   }
 
   async execute(input: EditingAgentInput, _c: null, ctx: AgentRunContext): Promise<EditPlan> {
-    const assets = ctx.tools.production.listAssets(input.productionId);
+    // Newest first, so a regenerated asset wins over an older attempt for the same scene.
+    const assets = ctx.tools.production.listAssets(input.productionId).filter(isActive).reverse();
     const aspectRatio = AspectRatio.parse(input.storyboard.aspectRatio);
     const size = aspectRatio === '9:16' ? { width: 1080, height: 1920 } : { width: ASPECT_RATIO_SIZES[aspectRatio].width, height: ASPECT_RATIO_SIZES[aspectRatio].height };
 
@@ -256,7 +273,8 @@ export class EditingAgent implements Agent<EditingAgentInput, EditPlan, null> {
       cursor = end;
       const lines = section.dialogue.map((d) => d.line);
       if (lines.length) captions.push({ start: round(start), end, text: lines.join(' ') });
-      const asset = assets.find((a) => a.kind === 'VOICE' && a.sceneId === section.sectionId);
+      const voices = assets.filter((a) => a.kind === 'VOICE' && a.sceneId === section.sectionId);
+      const asset = voices.find(usable) ?? voices[0];
       if (section.dialogue.some((d) => d.speaker === 'JOVI')) {
         voice.push({ sectionId: section.sectionId, assetId: asset?.id ?? null, assetStatus: asset?.status ?? null, start: round(start), end });
       }
@@ -287,6 +305,7 @@ export class EditingAgent implements Agent<EditingAgentInput, EditPlan, null> {
       sceneId: null,
       aspectRatio,
       sourceAssetIds: inputs.map((i) => i.assetId),
+      requirements: { privacy: input.privacy, durationSeconds: total },
       request: { editPlan: plan, inputs },
     });
     return { ...plan, render: { assetId: render.id, status: render.status, reason: render.statusReason } };

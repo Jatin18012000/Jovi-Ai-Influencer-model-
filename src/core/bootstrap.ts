@@ -5,6 +5,7 @@ import { ExecutiveAgent } from '../agents/executive/executive-agent.js';
 import { CreatorPlanningPipeline, IdeationAgent, ResearchAgent, StrategyAgent, TrendsAgent } from '../agents/planning/planning-agents.js';
 import { PLANNED_AGENTS } from '../agents/planned-agents.js';
 import { CreativeProductionPipeline } from '../agents/production/production-pipeline.js';
+import { MediaInspector } from '../media/media-inspector.js';
 import { MediaProviderRegistry } from '../media/media-provider-registry.js';
 import { MediaStore } from '../media/media-store.js';
 import { createMediaProvidersFromConfig } from '../media/providers/index.js';
@@ -126,13 +127,15 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   const contextEngine = new ContextEngine({ identity, strategy, memory, knowledge, semantic, decisions, providers });
 
   // Phase 8: visual identity, media providers, assets and productions.
-  const visualIdentity = new VisualIdentityService(db);
+  // Phase 9: capability-based provider selection with fallback and verified outputs.
+  const mediaStore = new MediaStore(config.media.dir, config.media.referenceDir);
+  const visualIdentity = new VisualIdentityService(db, 'jovi', (path) => mediaStore.isReadableInput(path));
   if (config.database.autoSeed) visualIdentity.seed();
-  const mediaStore = new MediaStore(config.media.dir);
-  const mediaProviders = new MediaProviderRegistry();
+  const mediaProviders = new MediaProviderRegistry(config.media.providerPreference);
   for (const provider of options.mediaProviders ?? createMediaProvidersFromConfig(config, mediaStore)) mediaProviders.register(provider);
   const assets = new AssetService(db);
-  const media = new MediaService(mediaProviders, assets, mediaStore, logger.child({ component: 'media' }), config.media.maxAttempts);
+  const mediaInspector = new MediaInspector({ ffprobePath: config.media.ffprobePath });
+  const media = new MediaService(mediaProviders, assets, mediaStore, mediaInspector, logger.child({ component: 'media' }), config.media.maxAttempts);
   const productions = new ProductionService(db, assets);
 
   // Agents receive no services: only the runner holds them, behind the ToolKit.

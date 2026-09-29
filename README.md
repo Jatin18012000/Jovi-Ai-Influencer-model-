@@ -6,10 +6,11 @@ Jovi is an autonomous AI virtual creator. Jovi Creator OS will eventually run th
 Research → Strategy → Ideation → Creation → QA → Publishing → Analytics → Learning → Evolution
 ```
 
-**Phase 8 (this release) adds the creative production layer** on top of Phase 7 planning and the Phase 6 core brain:
+**Phase 9 (this release) adds real media generation** — the `Image/Video/Voice → Editing` segment of the Phase 8 creative production boundary — on top of Phase 8 creative production, Phase 7 planning and the Phase 6 core brain:
 
 ```
-Phase 7 idea → Script → Storyboard → Visual prompts → {Image ∥ Video ∥ Voice} → Edit plan → QA → HUMAN APPROVAL BOUNDARY
+Phase 7 idea → Script → Storyboard → Visual prompts → {Image ∥ Video ∥ Voice} → Edit plan → Render → QA → HUMAN APPROVAL BOUNDARY
+                                                     └──────── Phase 9: capability-routed real providers, verified outputs ────────┘
 ```
 
 The Phase 6 core brain (still the foundation):
@@ -19,9 +20,9 @@ GOAL → TASK → JOB → CONTEXT → EXECUTIVE AGENT → MODEL ROUTER → MODEL
      → STRUCTURED OUTPUT (Zod) → EVALUATION → DECISION → MEMORY → EVENTS → RESULT (API / CLI)
 ```
 
-Phase 8 can generate images/video **only through a configured provider** (ComfyUI today). Google Flow, voice synthesis and editing/rendering have provider contracts but **no integration yet**, so those assets are reported `BLOCKED`, never faked. Nothing is published: the furthest a production goes is `AWAITING_HUMAN_APPROVAL`, and approval itself does not publish. Analytics, learning and publishing are later phases.
+Media is generated **only through a configured, available provider**: ComfyUI (image/video), macOS `say` or ElevenLabs (voice), ffmpeg (render). Every provider is opt-in; an unconfigured kind yields `BLOCKED` assets, never fakes. Google Flow has no executable API and stays `NOT_INTEGRATED`. Nothing is published: the furthest a production goes is `AWAITING_HUMAN_APPROVAL`, and approval itself does not publish. Publishing, analytics and learning are later phases.
 
-Architecture: [`docs/phase-6-architecture.md`](docs/phase-6-architecture.md) · [`docs/phase-7-architecture.md`](docs/phase-7-architecture.md) · [`docs/phase-8-architecture.md`](docs/phase-8-architecture.md) · NotebookLM note: [`docs/phase-8-notebooklm-project-note.md`](docs/phase-8-notebooklm-project-note.md).
+Architecture: [`docs/phase-6-architecture.md`](docs/phase-6-architecture.md) · [`docs/phase-7-architecture.md`](docs/phase-7-architecture.md) · [`docs/phase-8-architecture.md`](docs/phase-8-architecture.md) · [`docs/phase-9-architecture.md`](docs/phase-9-architecture.md) · NotebookLM notes: [`docs/phase-8-notebooklm-project-note.md`](docs/phase-8-notebooklm-project-note.md), [`docs/phase-9-notebooklm-project-note.md`](docs/phase-9-notebooklm-project-note.md).
 
 ---
 
@@ -117,6 +118,10 @@ npm run jovi -- --produce --from-plan <planningTaskId> [--idea idea-2] [--aspect
 npm run jovi -- --production <productionId>                 # status, assets, QA, publishing gate
 npm run jovi -- --decide <productionId> --decision APPROVE --reviewer "<name>" [--acknowledge-warnings]
 npm run jovi -- --simulate --produce "<goal>"               # simulation: canned text + SIMULATED media
+npm run jovi -- --regenerate-media <productionId> --requested-by "<name>" [--kinds IMAGE,VOICE] [--include-completed]
+                                                            # HUMAN: redo media (text reused), re-edit, re-QA
+npm run jovi -- --visual-identity                           # active visual identity + versions
+npm run jovi -- --set-visual-identity profile.json --approved-by "<name>" --summary "<why>"   # HUMAN: lock appearance
 ```
 
 The CLI calls the same `JoviOrchestrator.executeGoal()` as the API.
@@ -146,7 +151,10 @@ The CLI calls the same `JoviOrchestrator.executeGoal()` as the API.
 | GET | `/api/productions/:id/assets` | Media asset records (status, provider, location, reason) |
 | GET | `/api/productions/:id/publishing-gate` | `eligibleForHumanPublishing`, blockers; `autonomousPublishingAllowed` is always `false` |
 | POST | `/api/productions/:id/decision` | HUMAN decision `{"decision": "APPROVE"\|"REJECT", "reviewer", "note"?, "acknowledgeWarnings"?}` — `409` if QA does not allow it |
-| GET | `/api/media/providers` | Media provider states (AVAILABLE / NOT_CONFIGURED / UNREACHABLE / MISCONFIGURED / NOT_INTEGRATED) |
+| GET | `/api/media/providers` | Media provider states (AVAILABLE / NOT_CONFIGURED / UNREACHABLE / MISCONFIGURED / NOT_INTEGRATED), capabilities and preference order |
+| POST | `/api/productions/:id/regenerate-media` | HUMAN request `{"requestedBy", "reason"?, "kinds"?: ["IMAGE"\|"VIDEO"\|"VOICE"], "includeCompleted"?, "mode"?}` for a BLOCKED / AWAITING_HUMAN_APPROVAL production — `409` otherwise; rate limited |
+| GET | `/api/visual-identity` | Active visual identity + versions |
+| POST | `/api/visual-identity` | HUMAN: new version `{"profile", "approvedBy", "changeSummary"}`; LOCKED when every appearance anchor is set; reference images must be files in `JOVI_REFERENCE_DIR` |
 
 `POST /api/jovi/goal` returns `taskId`, `jobId`, `decisionId`, `selectedAction`, `options`, `confidence`, `reasoningSummary`, `nextActions`, `modelsUsed` (with `executionType`), `eventsGenerated`, `simulated` (plus `correlationId`, `selection`, `interpretation`, `priorities`, `contentDirection`, `evaluationSummary`, `attempts`). Status codes: `200` completed, `202` queued (async), `400` invalid input, `409` conflict, `429` rate limited (`Retry-After`), `503` no model available, `500` other failure.
 
@@ -205,9 +213,10 @@ npm run test:lmstudio       # LM Studio adapter + flow suites (fake LM Studio se
 npm run test:lmstudio:real  # REAL LM Studio end to end (needs the server running with a model loaded)
 npm run test:production     # Phase 8 contracts, media providers (fake ComfyUI server), pipeline e2e
 npm run test:production:real  # REAL LM Studio run of the Phase 8 text agents (script/storyboard/prompts/QA)
+JOVI_MEDIA_REAL=1 npx vitest run tests/integration/media.real.test.ts   # REAL media providers that are configured
 ```
 
-Test categories are kept distinct: **deterministic** (schemas, QA engine, state machines, governance), **mock provider** (canned text; LOCAL test-double media providers that write real files — *not* external integrations), **real LM Studio** (opt-in, `*.real.test.ts`) and **real external media** (none exist: ComfyUI is only tested against a fake HTTP server).
+Test categories are kept distinct: **deterministic unit** (schemas, QA engine, state machines, capability matching, inspector, render command, governance), **fake-server / fake-binary integration** (ComfyUI and ElevenLabs HTTP stand-ins, stand-in `say`/`ffmpeg` scripts), **simulated / test-double pipeline** (canned text; LOCAL/CLOUD test-double media providers writing real-signature files — *not* external integrations) and **real-provider E2E** (opt-in `*.real.test.ts`; each provider block runs only when configured and is otherwise reported as skipped).
 
 ## Docker
 
@@ -239,11 +248,23 @@ The planning layer is exposed through `npm run jovi:plan -- "<goal>"` and `POST 
 
 ComfyUI setup: set `COMFYUI_URL`, export your workflow with *Save (API)*, replace the prompt/size/seed/prefix inputs with the placeholders listed in `.env.example`, and point `COMFYUI_IMAGE_WORKFLOW` / `COMFYUI_VIDEO_WORKFLOW` at the files. Check with `npm run jovi:providers`.
 
-## Known limitations (Phase 8)
+## Phase 9 real media generation
 
-- Google Flow, voice synthesis and editing/rendering are **not integrated** (contracts only; assets `BLOCKED`). ComfyUI has been tested only against a fake ComfyUI HTTP server, never a real instance.
-- Visual identity consistency cannot be verified automatically (no visual inspector); it is a human review item.
-- The Phase 8 text agents have not been run against a real model in this repository's CI (see `npm run test:production:real`).
+- **One provider contract** for simulated, test-double and real providers: `capabilities()` (aspect ratios, max duration, image-to-video, reference images, languages, formats) + `inspectAvailability()` + the generate method.
+- **Capability routing** (`MediaProviderRegistry.candidates`): hard requirements (aspect ratio, duration, language, privacy — `LOCAL_ONLY` excludes cloud) filter providers; `JOVI_MEDIA_PROVIDER_PREFERENCE`, soft preferences (reference images, image-to-video), LOCAL-before-CLOUD order the rest. Later candidates are **fallbacks** (`MEDIA_PROVIDER_FALLBACK` event).
+- **Verified outputs** (`MediaInspector`): a file is accepted only if its container signature matches the asset kind; duration/dimensions are measured (ffprobe when `JOVI_FFPROBE_PATH` is set, else headers) and replace provider claims; a SHA-256 is recorded.
+- **Real adapters**: ComfyUI (+ reference-image and image-to-video uploads), macOS `say`, ElevenLabs, ffmpeg render (h264/aac MP4 with soft subtitles; missing scenes render black and are listed as placeholders that block the publishing gate).
+- **Human-requested media regeneration** for BLOCKED / AWAITING_HUMAN_APPROVAL productions: text stages are reused, unusable (or chosen) assets become `SUPERSEDED`, edit plan and QA are redone, and the production again stops at the approval boundary.
+- **Visual identity locking** via API/CLI (human only), with reference images confined to `JOVI_REFERENCE_DIR`.
+
+Setup on a Mac: `brew install ffmpeg` → `JOVI_FFMPEG_PATH=/opt/homebrew/bin/ffmpeg`, `JOVI_FFPROBE_PATH=/opt/homebrew/bin/ffprobe`; choose a voice with `say -v '?'` → `MACOS_SAY_VOICE=<name>`; start ComfyUI and set `COMFYUI_URL` + workflow paths. Check with `npm run jovi:providers`.
+
+## Known limitations (Phase 9)
+
+- Real-provider validation so far: **ffmpeg render only**, in the Linux build container (ffmpeg 6.1.1) with ffmpeg-synthesised test-pattern inputs. ComfyUI, macOS `say` and ElevenLabs have fake-server/fake-binary coverage only. Google Flow is not integrated.
+- No automated visual-identity inspector: face/hair/eyes consistency remains a human review item; Jovi's appearance anchors are not locked until a human records them.
+- Text overlays are not burned into renders (captions are a soft subtitle track); music is not selected.
+- The Phase 8 text agents were validated against real LM Studio (`google/gemma-4-12b-qat`, 2/2) on the owner's machine; that run was not clean (one schema-length failure, one ~5-minute header timeout).
 - No real-model run is part of CI (see `npm run test:lmstudio:real`).
 - One model per provider is routed (a second loaded LM Studio model is not yet used as an independent evaluator).
 - Semantic memory is a lexical baseline; model competition is availability-only; goal tiering is a keyword heuristic; pricing figures are estimates.

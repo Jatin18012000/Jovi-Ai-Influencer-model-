@@ -1,7 +1,7 @@
 import { ProviderUnavailableError } from '../../core/errors.js';
 import { nowIso } from '../../core/ids.js';
 import type { CostEstimate } from '../../models/types.js';
-import type { AspectRatio, MediaGenerationResult, MediaProviderStatus, VideoGenerationProvider } from '../types.js';
+import type { MediaCapabilities, MediaGenerationResult, MediaProviderStatus, VideoGenerationProvider } from '../types.js';
 
 const UNKNOWN_COST: CostEstimate = { estimatedApiCost: null, executionCostType: 'UNKNOWN', currency: 'USD', basis: 'provider not integrated' };
 
@@ -15,7 +15,6 @@ export class GoogleFlowVideoProvider implements VideoGenerationProvider {
   readonly id = 'google-flow';
   readonly kind = 'CLOUD' as const;
   readonly mediaKind = 'VIDEO' as const;
-  readonly supportsImageToVideo = true;
 
   async inspectAvailability(): Promise<MediaProviderStatus> {
     return {
@@ -34,8 +33,8 @@ export class GoogleFlowVideoProvider implements VideoGenerationProvider {
     return [];
   }
 
-  supportedAspectRatios(): AspectRatio[] {
-    return ['9:16', '16:9'];
+  capabilities(): MediaCapabilities {
+    return { aspectRatios: ['9:16', '16:9'], maxDurationSeconds: null, imageToVideo: true, referenceImages: false, languages: null, outputFormats: ['.mp4'] };
   }
 
   estimateCost(): CostEstimate {

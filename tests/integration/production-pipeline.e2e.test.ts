@@ -298,8 +298,8 @@ describe('creative production pipeline — missing providers and simulation', ()
     const reasons = result.assets.map((a) => a.reason).join('\n');
     expect(reasons).toMatch(/comfyui-image: NOT_CONFIGURED/);
     expect(reasons).toMatch(/google-flow: NOT_INTEGRATED/);
-    expect(reasons).toMatch(/PROVIDER_NOT_CONFIGURED: no voice provider/);
-    expect(reasons).toMatch(/PROVIDER_NOT_CONFIGURED: no render provider/);
+    expect(reasons).toMatch(/NO_AVAILABLE_VOICE_PROVIDER: macos-say: NOT_CONFIGURED .*elevenlabs: NOT_CONFIGURED/);
+    expect(reasons).toMatch(/NO_AVAILABLE_RENDER_PROVIDER: ffmpeg-render: NOT_CONFIGURED/);
     expect(existsSync(join(dir, result.productionId!))).toBe(false);
     expect(eventTypes(result)).not.toContain('IMAGE_GENERATED');
 
@@ -395,6 +395,9 @@ describe('Phase 8 API', () => {
         'comfyui-image:NOT_CONFIGURED',
         'comfyui-video:NOT_CONFIGURED',
         'google-flow:NOT_INTEGRATED',
+        'macos-say:NOT_CONFIGURED',
+        'elevenlabs:NOT_CONFIGURED',
+        'ffmpeg-render:NOT_CONFIGURED',
       ]);
 
       const async = await app.inject({ method: 'POST', url: '/api/productions', payload: { idea: IDEA, mode: 'async' } });

@@ -61,11 +61,30 @@ export interface ActiveVisualIdentity {
  * Read access for agents (via the `identity.read` tool) and versioned,
  * human-approved updates. There is deliberately no agent tool that writes it.
  */
+export const VisualIdentityVersionInputSchema = z.object({
+  profile: VisualIdentitySchema,
+  approvedBy: z.string().trim().min(2).max(100),
+  changeSummary: z.string().trim().min(3).max(1000),
+});
+export type VisualIdentityVersionInput = z.input<typeof VisualIdentityVersionInputSchema>;
+
 export class VisualIdentityService {
   constructor(
     private readonly db: JoviDatabase,
     private readonly identityId = 'jovi',
+    /** Validates reference image paths (must be real files in the reference/media directories). */
+    private readonly referenceCheck: (path: string) => boolean = () => true,
   ) {}
+
+  listVersions(): Array<{ version: number; status: 'NOT_LOCKED' | 'LOCKED'; isActive: boolean; approvedBy: string; changeSummary: string; createdAt: string }> {
+    return this.db
+      .select()
+      .from(visualIdentityVersions)
+      .where(eq(visualIdentityVersions.identityId, this.identityId))
+      .orderBy(desc(visualIdentityVersions.version))
+      .all()
+      .map((r) => ({ version: r.version, status: r.status, isActive: r.isActive, approvedBy: r.approvedBy, changeSummary: r.changeSummary, createdAt: r.createdAt }));
+  }
 
   getActive(): ActiveVisualIdentity {
     const row = this.db
@@ -103,6 +122,10 @@ export class VisualIdentityService {
   createVersion(profile: VisualIdentity, approvedBy: string, changeSummary: string): ActiveVisualIdentity {
     if (!approvedBy.trim()) throw new ValidationError('approvedBy is required for visual identity changes');
     const valid = VisualIdentitySchema.parse(profile);
+    const badReferences = valid.referenceImages.filter((path) => !this.referenceCheck(path));
+    if (badReferences.length) {
+      throw new ValidationError(`reference images must be existing files inside the reference or media directory: ${badReferences.join(', ')}`);
+    }
     const status = LOCKABLE_FIELDS.every((f) => valid[f] !== null && valid[f]!.trim() !== '') ? 'LOCKED' : 'NOT_LOCKED';
     this.db.transaction((tx) => {
       const latest = tx

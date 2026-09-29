@@ -61,7 +61,9 @@ const check = (
  */
 export function runCreativeQA(input: QAInput): QAReport {
   const checks: QACheck[] = [];
-  const { script, storyboard, prompts, editPlan, assets, identity, visual } = input;
+  const { script, storyboard, prompts, editPlan, identity, visual } = input;
+  // Rejected/superseded assets are audit history; QA judges the current set.
+  const assets = input.assets.filter((a) => a.status !== 'SUPERSEDED' && a.status !== 'REJECTED');
 
   if (!script || !storyboard || !prompts || !editPlan) {
     checks.push(check('technical.artifacts', 'TECHNICAL', 'All production artifacts present', 'FAILED', 'script, storyboard, visual prompts and edit plan are required'));

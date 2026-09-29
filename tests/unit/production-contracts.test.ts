@@ -391,7 +391,8 @@ describe('governance contracts', () => {
     for (const [from, targets] of Object.entries(PRODUCTION_TRANSITIONS)) {
       if (from !== 'AWAITING_HUMAN_APPROVAL') expect(targets, from).not.toContain('APPROVED');
     }
-    expect(PRODUCTION_TRANSITIONS.BLOCKED).toEqual(['REJECTED']);
+    // BLOCKED can only be rejected or sent back to media regeneration — both human-only actions.
+    expect(PRODUCTION_TRANSITIONS.BLOCKED).toEqual(['REJECTED', 'GENERATING_ASSETS']);
   });
 
   it('pipeline code cannot set APPROVED/REJECTED; approval needs a passing QA verdict', () => {

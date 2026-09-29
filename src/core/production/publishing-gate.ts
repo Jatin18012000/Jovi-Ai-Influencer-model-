@@ -14,8 +14,10 @@ export interface PublishingGateResult {
  * It never publishes: there is no publish function, tool, endpoint or
  * production state for publishing in Phase 8.
  */
-export function evaluatePublishingGate(production: Production, assets: MediaAsset[]): PublishingGateResult {
+export function evaluatePublishingGate(production: Production, allAssets: MediaAsset[]): PublishingGateResult {
   const blockers: string[] = [];
+  // Superseded assets were replaced by a human-requested regeneration; they are audit history only.
+  const assets = allAssets.filter((a) => a.status !== 'SUPERSEDED');
   if (production.qaStatus !== 'PASS' && production.qaStatus !== 'PASS_WITH_WARNINGS') {
     blockers.push(`QA status is ${production.qaStatus ?? 'not run'}`);
   }
@@ -23,6 +25,8 @@ export function evaluatePublishingGate(production: Production, assets: MediaAsse
   if (production.simulated || assets.some((a) => a.simulated)) blockers.push('production contains simulated assets');
   const render = assets.find((a) => a.kind === 'RENDER' && a.status === 'COMPLETED');
   if (!render) blockers.push('no completed final render exists');
+  const placeholders = (render?.metadata as { placeholderScenes?: string[] } | null)?.placeholderScenes ?? [];
+  if (placeholders.length) blockers.push(`final render has placeholder (black) scenes: ${placeholders.join(', ')}`);
   const unusable = assets.filter((a) => ['FAILED', 'BLOCKED', 'REJECTED'].includes(a.status));
   if (unusable.length) blockers.push(`${unusable.length} asset(s) failed, blocked or rejected`);
   return { eligibleForHumanPublishing: blockers.length === 0, autonomousPublishingAllowed: false, blockers };

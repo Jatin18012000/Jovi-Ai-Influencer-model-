@@ -2,11 +2,11 @@ import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import type { JoviDatabase } from '../../database/client.js';
 import { productionArtifacts, productions } from '../../database/schema.js';
-import type { EventType, ProductionStatus, QAStatus } from '../../types/enums.js';
+import { MediaKind, type AssetStatus, type EventType, type ProductionStatus, type QAStatus } from '../../types/enums.js';
 import { ConflictError, NotFoundError, ValidationError, serializeError } from '../errors.js';
 import type { CorrelationScope } from '../events/event-bus.js';
 import { newId, nowIso } from '../ids.js';
-import type { AssetService } from './asset-service.js';
+import { INACTIVE_ASSET_STATUSES, type AssetService } from './asset-service.js';
 import { evaluatePublishingGate, type PublishingGateResult } from './publishing-gate.js';
 
 export type Production = typeof productions.$inferSelect;
@@ -17,7 +17,9 @@ const SOURCE = 'production';
 /**
  * Production lifecycle. Agents/pipeline can only move a production forward to
  * the human approval boundary. APPROVED/REJECTED are reachable only through
- * `recordHumanDecision`, and there is no PUBLISHED state in Phase 8.
+ * `recordHumanDecision`, and there is no PUBLISHED state. Leaving BLOCKED or
+ * AWAITING_HUMAN_APPROVAL back to GENERATING_ASSETS (media regeneration) is
+ * only possible through `requestMediaRegeneration`, a human/operator action.
  */
 export const PRODUCTION_TRANSITIONS: Record<ProductionStatus, ProductionStatus[]> = {
   CREATED: ['SCRIPTING', 'FAILED'],
@@ -27,13 +29,16 @@ export const PRODUCTION_TRANSITIONS: Record<ProductionStatus, ProductionStatus[]
   GENERATING_ASSETS: ['EDITING', 'FAILED'],
   EDITING: ['QA', 'FAILED'],
   QA: ['AWAITING_HUMAN_APPROVAL', 'BLOCKED', 'FAILED'],
-  AWAITING_HUMAN_APPROVAL: ['APPROVED', 'REJECTED'],
-  BLOCKED: ['REJECTED'],
+  AWAITING_HUMAN_APPROVAL: ['APPROVED', 'REJECTED', 'GENERATING_ASSETS'],
+  BLOCKED: ['REJECTED', 'GENERATING_ASSETS'],
   APPROVED: [],
   REJECTED: [],
   FAILED: [],
 };
 const HUMAN_ONLY: ProductionStatus[] = ['APPROVED', 'REJECTED'];
+/** States only a human decision or a human regeneration request may leave. */
+const HUMAN_GATED_FROM: ProductionStatus[] = ['AWAITING_HUMAN_APPROVAL', 'BLOCKED'];
+const REGENERABLE_KINDS = ['IMAGE', 'VIDEO', 'VOICE'] as const;
 
 const ARTIFACT_EVENT: Record<ArtifactKind, EventType> = {
   SCRIPT: 'SCRIPT_CREATED',
@@ -51,6 +56,16 @@ export const HumanDecisionSchema = z.object({
   acknowledgeWarnings: z.boolean().default(false),
 });
 export type HumanDecision = z.input<typeof HumanDecisionSchema>;
+
+export const MediaRegenerationSchema = z.object({
+  requestedBy: z.string().trim().min(2).max(100),
+  reason: z.string().max(1000).optional(),
+  /** Which kinds to regenerate (default all). The final render is always redone. */
+  kinds: z.array(MediaKind.extract([...REGENERABLE_KINDS])).min(1).optional(),
+  /** Also replace COMPLETED assets of those kinds (e.g. a human disliked the images). */
+  includeCompleted: z.boolean().default(false),
+});
+export type MediaRegenerationRequest = z.input<typeof MediaRegenerationSchema>;
 
 export class ProductionService {
   constructor(
@@ -105,6 +120,8 @@ export class ProductionService {
   /** Pipeline-driven transitions. Refuses the human-only states. */
   advance(id: string, to: ProductionStatus, scope: CorrelationScope, fields: Partial<Production> = {}): Production {
     if (HUMAN_ONLY.includes(to)) throw new ValidationError(`${to} can only be set by a human decision`);
+    const from = this.get(id).status as ProductionStatus;
+    if (HUMAN_GATED_FROM.includes(from)) throw new ValidationError(`a production in ${from} can only be moved by a human decision or regeneration request`);
     return this.transition(id, to, scope, fields);
   }
 
@@ -130,6 +147,11 @@ export class ProductionService {
     return row;
   }
 
+  /** When the latest artifact of a kind was stored (null if none). */
+  artifactCreatedAt(productionId: string, kind: ArtifactKind): string | null {
+    return this.latestArtifactRow(productionId, kind)?.createdAt ?? null;
+  }
+
   latestArtifact<T = unknown>(productionId: string, kind: ArtifactKind): T | null {
     return (this.latestArtifactRow(productionId, kind)?.content as T | undefined) ?? null;
   }
@@ -153,7 +175,7 @@ export class ProductionService {
         decidedAt: nowIso(),
       });
       for (const asset of this.assets.list(id)) {
-        if (asset.status !== 'REJECTED') this.assets.transition(asset.id, 'REJECTED', { statusReason: `production rejected by ${decision.reviewer}` }, scope);
+        if (!INACTIVE_ASSET_STATUSES.includes(asset.status as AssetStatus)) this.assets.transition(asset.id, 'REJECTED', { statusReason: `production rejected by ${decision.reviewer}` }, scope);
       }
       return updated;
     }
@@ -172,6 +194,38 @@ export class ProductionService {
       approvalNote: decision.note ?? null,
       decidedAt: nowIso(),
     });
+  }
+
+  /**
+   * Human/operator request to regenerate media for an existing production
+   * (e.g. after configuring a provider, or to replace images a human
+   * rejected), without re-running the text stages. Unusable assets of the
+   * chosen kinds — and COMPLETED ones when `includeCompleted` — plus every
+   * render are SUPERSEDED (kept for audit); QA is reset and must run again.
+   */
+  requestMediaRegeneration(id: string, input: MediaRegenerationRequest, scope: CorrelationScope): Production {
+    const request = MediaRegenerationSchema.parse(input);
+    const production = this.get(id);
+    const status = production.status as ProductionStatus;
+    if (!HUMAN_GATED_FROM.includes(status)) throw new ConflictError(`Production in status ${status} cannot regenerate media (only BLOCKED or AWAITING_HUMAN_APPROVAL)`);
+    for (const kind of ['SCRIPT', 'STORYBOARD', 'VISUAL_PROMPTS'] as const) {
+      if (!this.latestArtifact(id, kind)) throw new ConflictError(`Production has no ${kind} artifact; start a new production instead`);
+    }
+    const kinds: readonly string[] = request.kinds ?? REGENERABLE_KINDS;
+    const superseded: string[] = [];
+    for (const asset of this.assets.list(id)) {
+      const current = asset.status as AssetStatus;
+      if (INACTIVE_ASSET_STATUSES.includes(current)) continue;
+      const replace = asset.kind === 'RENDER' || (kinds.includes(asset.kind) && (current !== 'COMPLETED' || request.includeCompleted));
+      if (!replace) continue;
+      if (['REQUESTED', 'QUEUED', 'GENERATING'].includes(current)) {
+        this.assets.transition(asset.id, 'FAILED', { statusReason: 'interrupted: generation did not finish' }, scope);
+      }
+      this.assets.transition(asset.id, 'SUPERSEDED', { statusReason: `superseded by media regeneration requested by ${request.requestedBy}` }, scope);
+      superseded.push(asset.id);
+    }
+    scope.emit('MEDIA_REGENERATION_REQUESTED', SOURCE, id, { requestedBy: request.requestedBy, reason: request.reason ?? null, kinds, includeCompleted: request.includeCompleted, superseded });
+    return this.transition(id, 'GENERATING_ASSETS', scope, { qaStatus: null, error: null });
   }
 
   publishingGate(id: string): PublishingGateResult {
