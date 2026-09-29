@@ -18,7 +18,7 @@ export interface AgentDefinition {
   version: string;
   description: string;
   capabilities: string[];
-  allowedTools: ToolName[];
+  allowedTools: readonly ToolName[];
   permissionLevel: PermissionLevel;
   modelRequirements: ModelRequirements;
   costClass: CostClass;
