@@ -1,5 +1,9 @@
 import { z } from 'zod';
 import { ContextEngine, type JoviContext } from '../../core/orchestrator/context-engine.js';
+import type { EventBus } from '../../core/events/event-bus.js';
+import { newId } from '../../core/ids.js';
+import type { TaskService } from '../../core/jobs/task-service.js';
+import type { AgentRunner } from '../agent-runner.js';
 import { parseModelJson } from '../../models/json-output.js';
 import type { Agent, AgentDefinition, AgentRunContext } from '../agent.js';
 
@@ -315,14 +319,14 @@ export interface PlanningResult {
 export class CreatorPlanningPipeline {
   constructor(
     private readonly deps: {
-      tasks: { create: Function; start: Function; complete: Function; fail: Function };
-      events: { scope: Function };
-      runner: { run: Function };
+      tasks: TaskService;
+      events: EventBus;
+      runner: AgentRunner;
     },
   ) {}
 
   async execute(request: PlanningRequest): Promise<PlanningResult> {
-    const correlationId = `correlation_planning_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const correlationId = newId('correlation');
     const scope = this.deps.events.scope(correlationId);
     const task = this.deps.tasks.create({
       type: 'CREATOR_PLANNING',
