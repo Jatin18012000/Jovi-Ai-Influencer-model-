@@ -6,14 +6,14 @@ Jovi is an autonomous AI virtual creator. Jovi Creator OS will eventually run th
 Research → Strategy → Ideation → Creation → QA → Publishing → Analytics → Learning → Evolution
 ```
 
-**Phase 6 (this release) implements only the core brain:**
+**Phase 7 (this release) adds the creator-planning layer on top of the Phase 6 core brain:**
 
 ```
 GOAL → TASK → JOB → CONTEXT → EXECUTIVE AGENT → MODEL ROUTER → MODEL (LM Studio or cloud)
      → STRUCTURED OUTPUT (Zod) → EVALUATION → DECISION → MEMORY → EVENTS → RESULT (API / CLI)
 ```
 
-It does **not** generate images or video, publish, ingest analytics or discover opportunities. Those are later phases. Phase 6 is a *controlled brain*: it proposes and decides, and never acts outside the system.
+It does **not** generate images or video, publish, ingest analytics or perform live social-web trend verification. Those are later phases. Phase 7 is still planning-only: it researches from available internal/model context, proposes strategy and generates ideas, but does not activate strategy or act externally.
 
 Architecture details: [`docs/phase-6-architecture.md`](docs/phase-6-architecture.md).
 
@@ -35,6 +35,7 @@ Run a goal (needs LM Studio with a loaded model, or a cloud API key):
 ```bash
 npm run jovi -- "Create an Instagram Reel concept that introduces Jovi to a new audience and makes viewers curious about who she is."
 npm run jovi -- --local-only "<goal>"     # force LM Studio for generation AND evaluation
+npm run jovi:plan -- "<goal>"              # Research → Trends → Strategy → Ideation
 ```
 
 Start the API:
@@ -196,7 +197,11 @@ LM Studio runs on the host; the container reaches it at `host.docker.internal:12
 - Structured JSON logs (pino) carry `taskId`, `jobId`, `correlationId`, `agent`, `provider`, `model`, `durationMs`, retries and errors. Everything is queryable in SQLite (`tasks`, `jobs`, `agent_runs`, `model_runs`, `events`, `decisions`).
 - Cost: cloud runs record list-price estimates (or `null` when unknown); LM Studio records `0` with `LOCAL_COMPUTE`; simulation records `0` with `NONE`.
 
-## Known limitations (Phase 6)
+## Phase 7 planning
+
+The planning layer is exposed through `npm run jovi:plan -- "<goal>"` and `POST /api/jovi/planning`. It runs four structured agents — Research, Trends, Strategy and Ideation — through the same permission-enforced AgentRunner and Model Router. Research is explicitly not live-web verification until a web research connector is added. Strategy output is a proposal only and does not mutate the active strategy.
+
+## Known limitations (Phase 7)
 
 - No real-model run has been verified yet in CI (see `npm run test:lmstudio:real`).
 - One model per provider is routed (a second loaded LM Studio model is not yet used as an independent evaluator).
