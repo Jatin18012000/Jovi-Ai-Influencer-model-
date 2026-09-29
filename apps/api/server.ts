@@ -31,6 +31,12 @@ const MemoryQuery = z.object({
   limit: z.coerce.number().int().min(1).max(500).default(50),
 });
 
+const PlanningBody = z.object({
+  goal: z.string().trim().min(5).max(2000),
+  topic: z.string().trim().max(500).optional(),
+  constraints: z.array(z.string().max(300)).max(10).optional(),
+});
+
 const EvaluateBody = z.union([
   z.object({ decisionId: z.string().min(1), mode: z.enum(['AUTO', 'RULES_ONLY']).default('AUTO') }),
   z.object({
@@ -97,7 +103,7 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
       status: 'ok',
       service: 'jovi-core',
       version: '0.1.0',
-      phase: 6,
+      phase: 7,
       database: 'ok',
       simulationMode: core.providers.isSimulation(),
       providers: statuses.map((s) => ({ provider: s.provider, kind: s.kind, available: s.available, model: s.selectedModel, reason: s.reason })),
@@ -131,6 +137,11 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
       return reply.code(code === 'NO_MODEL_AVAILABLE' ? 503 : 500).send(result);
     }
     return reply.code(200).send(result);
+  });
+
+  app.post('/api/jovi/planning', async (request) => {
+    const body = PlanningBody.parse(request.body ?? {});
+    return guarded(request.ip, () => core.planning.execute({ ...body, createdBy: 'api' }));
   });
 
   app.get('/api/jovi/goal/:id', async (request) => {
