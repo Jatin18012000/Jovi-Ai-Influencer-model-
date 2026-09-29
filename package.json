@@ -2,7 +2,7 @@
   "name": "jovi-creator-os",
   "version": "0.1.0",
   "private": true,
-  "description": "Jovi Creator OS \u2014 autonomous AI creator system. Phase 6: Jovi Core v0.1 (the core brain).",
+  "description": "Jovi Creator OS — autonomous AI creator system. Phase 6: Jovi Core v0.1 (the core brain).",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -24,7 +24,8 @@
     "db:reset": "tsx src/database/scripts/reset.ts",
     "test:lmstudio": "vitest run tests/unit/lmstudio-provider.test.ts tests/integration/lmstudio-flow.e2e.test.ts tests/integration/lmstudio.real.test.ts",
     "test:lmstudio:real": "JOVI_LMSTUDIO_REAL=1 vitest run tests/integration/lmstudio.real.test.ts",
-    "jovi:simulate": "tsx apps/orchestrator/cli.ts --simulate"
+    "jovi:simulate": "tsx apps/orchestrator/cli.ts --simulate",
+    "jovi:plan": "tsx apps/orchestrator/cli.ts --plan"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
