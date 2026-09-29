@@ -67,16 +67,16 @@ export function findViolation(text: string, pattern: RegExp, options: { privacyS
   return null;
 }
 
-const HUMAN_CLAIM = /\b(i'?m|i am|she'?s|she is|as) (a )?(real|actual) (person|human|girl|woman)\b|\b(i'?m|i am) (not (an? )?(ai|bot|robot)|human)\b|\bnot an ai\b/i;
-const PRIVACY = [
+export const HUMAN_CLAIM = /\b(i'?m|i am|she'?s|she is|as) (a )?(real|actual) (person|human|girl|woman)\b|\b(i'?m|i am) (not (an? )?(ai|bot|robot)|human)\b|\bnot an ai\b/i;
+export const PRIVACY = [
   /\b(my|her) (home )?address\b/i,
   /\bwhere (i|she) (actually )?lives?\b/i,
   /\b(my|her) (mum|mom|dad|father|mother|brother|sister|parents|family) (is|are|lives?|works?)\b/i,
   /\b(my|her) (boyfriend|girlfriend|partner|husband|ex)\b/i,
   /\b(my|her) (salary|bank balance|net worth|income|savings)\b/i,
 ];
-const EXPLICIT = /(?<!non-)\b(nude|nudity|explicit|nsfw|onlyfans|x-rated|porn)\b/i;
-const CLICHES = [
+export const EXPLICIT = /(?<!non-)\b(nude|nudity|explicit|nsfw|onlyfans|x-rated|porn)\b/i;
+export const CLICHES = [
   'rise and grind',
   'no days off',
   'living my best life',

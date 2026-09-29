@@ -99,7 +99,7 @@ export const EXECUTIVE_PROPOSAL_SHAPE = `{
   "recommendedOptionId": "id of the option you recommend",
   "rationaleSummary": "string — concise, auditable reason for the recommendation (no step-by-step reasoning)",
   "confidence": 0.0,
-  "nextActions": [{ "action": "string", "agent": "script | visual | qa | publishing | research | strategy | executive" }]
+  "nextActions": [{ "action": "string", "agent": "script | storyboard | visual-prompt | image-generation | video-generation | voice | editing | qa | publishing | research | strategy | executive" }]
 }`;
 
 // ---------------------------------------------------------------------------

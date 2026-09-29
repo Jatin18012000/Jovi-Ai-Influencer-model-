@@ -2,6 +2,7 @@ import { InvalidModelOutputError, ProviderError } from '../../core/errors.js';
 import { nowIso } from '../../core/ids.js';
 import type { ProviderKind } from '../../types/enums.js';
 import { MOCK_COST } from '../pricing.js';
+import { mockPlanning, mockProduction } from './mock-creative.js';
 import type { GenerateRequest, GenerateResult, ModelProvider, ProviderStatus } from '../types.js';
 
 export interface MockProviderOptions {
@@ -91,8 +92,13 @@ function defaultResponse(request: GenerateRequest): string {
       return JSON.stringify(mockExecutiveProposal(extractTag(request.context.prompt, 'goal') ?? 'Grow Jovi’s audience'));
     case 'evaluation.options':
       return JSON.stringify(mockEvaluation(extractTag(request.context.prompt, 'options_json')));
-    default:
+    default: {
+      const canned = request.task.type.startsWith('planning.')
+        ? mockPlanning(request.task.type, request.context.prompt)
+        : mockProduction(request.task.type, request.context.prompt);
+      if (canned !== null) return JSON.stringify(canned);
       throw new InvalidModelOutputError(`mock provider has no canned response for task type ${request.task.type}`);
+    }
   }
 }
 
@@ -175,7 +181,7 @@ export function mockExecutiveProposal(goal: string) {
     confidence: 0.72,
     nextActions: [
       { action: 'Write the 15-second script and on-screen text for the selected concept', agent: 'script' },
-      { action: 'Define shot list and visual references consistent with the visual bible', agent: 'visual' },
+      { action: 'Storyboard the selected concept consistent with the visual bible', agent: 'storyboard' },
       { action: 'Run QA against voice guide and privacy boundaries', agent: 'qa' },
       { action: 'Publish the Reel to Instagram once approved', agent: 'publishing' },
     ],

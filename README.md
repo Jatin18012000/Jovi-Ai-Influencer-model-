@@ -6,16 +6,22 @@ Jovi is an autonomous AI virtual creator. Jovi Creator OS will eventually run th
 Research → Strategy → Ideation → Creation → QA → Publishing → Analytics → Learning → Evolution
 ```
 
-**Phase 7 (this release) adds the creator-planning layer on top of the Phase 6 core brain:**
+**Phase 8 (this release) adds the creative production layer** on top of Phase 7 planning and the Phase 6 core brain:
+
+```
+Phase 7 idea → Script → Storyboard → Visual prompts → {Image ∥ Video ∥ Voice} → Edit plan → QA → HUMAN APPROVAL BOUNDARY
+```
+
+The Phase 6 core brain (still the foundation):
 
 ```
 GOAL → TASK → JOB → CONTEXT → EXECUTIVE AGENT → MODEL ROUTER → MODEL (LM Studio or cloud)
      → STRUCTURED OUTPUT (Zod) → EVALUATION → DECISION → MEMORY → EVENTS → RESULT (API / CLI)
 ```
 
-It does **not** generate images or video, publish, ingest analytics or perform live social-web trend verification. Those are later phases. Phase 7 is still planning-only: it researches from available internal/model context, proposes strategy and generates ideas, but does not activate strategy or act externally.
+Phase 8 can generate images/video **only through a configured provider** (ComfyUI today). Google Flow, voice synthesis and editing/rendering have provider contracts but **no integration yet**, so those assets are reported `BLOCKED`, never faked. Nothing is published: the furthest a production goes is `AWAITING_HUMAN_APPROVAL`, and approval itself does not publish. Analytics, learning and publishing are later phases.
 
-Architecture details: [`docs/phase-6-architecture.md`](docs/phase-6-architecture.md).
+Architecture: [`docs/phase-6-architecture.md`](docs/phase-6-architecture.md) · [`docs/phase-7-architecture.md`](docs/phase-7-architecture.md) · [`docs/phase-8-architecture.md`](docs/phase-8-architecture.md) · NotebookLM note: [`docs/phase-8-notebooklm-project-note.md`](docs/phase-8-notebooklm-project-note.md).
 
 ---
 
@@ -36,6 +42,7 @@ Run a goal (needs LM Studio with a loaded model, or a cloud API key):
 npm run jovi -- "Create an Instagram Reel concept that introduces Jovi to a new audience and makes viewers curious about who she is."
 npm run jovi -- --local-only "<goal>"     # force LM Studio for generation AND evaluation
 npm run jovi:plan -- "<goal>"              # Research → Trends → Strategy → Ideation
+npm run jovi -- --produce "<goal>"         # plan, then produce the recommended idea (stops at human approval)
 ```
 
 Start the API:
@@ -104,6 +111,12 @@ npm run jovi -- --json "<goal>"           # raw JSON result
 npm run jovi -- --providers               # provider status + LM Studio discovery
 npm run jovi -- --identity                # Jovi's active identity
 npm run jovi -- --simulate "<goal>"       # simulation only (mock)
+npm run jovi -- --plan "<goal>"           # Phase 7 planning
+npm run jovi -- --produce "<goal>"        # Phase 7 planning → Phase 8 production of the recommended idea
+npm run jovi -- --produce --from-plan <planningTaskId> [--idea idea-2] [--aspect-ratio 9:16]
+npm run jovi -- --production <productionId>                 # status, assets, QA, publishing gate
+npm run jovi -- --decide <productionId> --decision APPROVE --reviewer "<name>" [--acknowledge-warnings]
+npm run jovi -- --simulate --produce "<goal>"               # simulation: canned text + SIMULATED media
 ```
 
 The CLI calls the same `JoviOrchestrator.executeGoal()` as the API.
@@ -126,6 +139,14 @@ The CLI calls the same `JoviOrchestrator.executeGoal()` as the API.
 | GET | `/api/models` | Provider status, models table, competition availability, routing policy |
 | GET | `/api/agents` | Active and planned agents, permission levels |
 | POST | `/api/evaluate` | Evaluate ad-hoc options (`{objective, options}`) or a decision (`{decisionId}`) — rate limited |
+| POST | `/api/jovi/planning` | Phase 7 planning (Research → Trends → Strategy → Ideation) |
+| POST | `/api/productions` | Phase 8 production: exactly one of `{"goal"}`, `{"planningTaskId", "ideaId"?}` or `{"idea"}`; `aspectRatio`?, `privacy`?, `mode`? — rate limited |
+| GET | `/api/productions/:id` | Production status, source idea, assets, QA summary, publishing gate, events |
+| GET | `/api/productions/:id/{script,storyboard,visual-prompts,edit-plan,qa}` | Latest artifact of that kind |
+| GET | `/api/productions/:id/assets` | Media asset records (status, provider, location, reason) |
+| GET | `/api/productions/:id/publishing-gate` | `eligibleForHumanPublishing`, blockers; `autonomousPublishingAllowed` is always `false` |
+| POST | `/api/productions/:id/decision` | HUMAN decision `{"decision": "APPROVE"\|"REJECT", "reviewer", "note"?, "acknowledgeWarnings"?}` — `409` if QA does not allow it |
+| GET | `/api/media/providers` | Media provider states (AVAILABLE / NOT_CONFIGURED / UNREACHABLE / MISCONFIGURED / NOT_INTEGRATED) |
 
 `POST /api/jovi/goal` returns `taskId`, `jobId`, `decisionId`, `selectedAction`, `options`, `confidence`, `reasoningSummary`, `nextActions`, `modelsUsed` (with `executionType`), `eventsGenerated`, `simulated` (plus `correlationId`, `selection`, `interpretation`, `priorities`, `contentDirection`, `evaluationSummary`, `attempts`). Status codes: `200` completed, `202` queued (async), `400` invalid input, `409` conflict, `429` rate limited (`Retry-After`), `503` no model available, `500` other failure.
 
@@ -182,7 +203,11 @@ npm test                    # no network, no API keys, no LM Studio required
 npm run build
 npm run test:lmstudio       # LM Studio adapter + flow suites (fake LM Studio server)
 npm run test:lmstudio:real  # REAL LM Studio end to end (needs the server running with a model loaded)
+npm run test:production     # Phase 8 contracts, media providers (fake ComfyUI server), pipeline e2e
+npm run test:production:real  # REAL LM Studio run of the Phase 8 text agents (script/storyboard/prompts/QA)
 ```
+
+Test categories are kept distinct: **deterministic** (schemas, QA engine, state machines, governance), **mock provider** (canned text; LOCAL test-double media providers that write real files — *not* external integrations), **real LM Studio** (opt-in, `*.real.test.ts`) and **real external media** (none exist: ComfyUI is only tested against a fake HTTP server).
 
 ## Docker
 
@@ -201,9 +226,25 @@ LM Studio runs on the host; the container reaches it at `host.docker.internal:12
 
 The planning layer is exposed through `npm run jovi:plan -- "<goal>"` and `POST /api/jovi/planning`. It runs four structured agents — Research, Trends, Strategy and Ideation — through the same permission-enforced AgentRunner and Model Router. Research is explicitly not live-web verification until a web research connector is added. Strategy output is a proposal only and does not mutate the active strategy.
 
-## Known limitations (Phase 7)
+## Phase 8 creative production
 
-- No real-model run has been verified yet in CI (see `npm run test:lmstudio:real`).
+`npm run jovi -- --produce "<goal>"` / `POST /api/productions` runs Phase 7 planning (or reuses a planning task via `planningTaskId`) and produces the recommended idea (`recommendedIdeaIds[0]`, or `ideaId`):
+
+- **Eight agents**, all through the same AgentRunner, ToolKit permissions, TaskService/JobQueue and Model Router: Script, Storyboard, Visual Prompt (text, `LEVEL_2`), Image Generation, Video Generation, Voice, Editing (`LEVEL_3`, one media tool each) and QA (`LEVEL_2`). None can publish, approve or change identity.
+- **Providers are abstractions** (`src/media/types.ts`): image (ComfyUI), video (ComfyUI, Google Flow slot), voice, editing/render. A kind without an available provider yields `BLOCKED` assets with the reason. `MediaService` marks an asset `COMPLETED` only when a non-mock provider returned output that exists as a non-empty file inside `JOVI_MEDIA_DIR` (or an https URL).
+- **Asset lifecycle:** `REQUESTED → QUEUED → GENERATING → COMPLETED | SIMULATED | FAILED`, `BLOCKED` when no provider, `REJECTED` by a human.
+- **QA** combines deterministic identity/safety/technical checks with model-judged quality checks → `PASS | PASS_WITH_WARNINGS | FAIL | BLOCKED`. Anything that cannot be verified (e.g. face consistency with no visual inspector, an unlocked visual identity, simulated/blocked media) is `NOT_VERIFIABLE`, never `PASSED`.
+- **Human boundary:** productions end at `AWAITING_HUMAN_APPROVAL` (QA passed) or `BLOCKED`. Only `recordHumanDecision` (CLI `--decide`, API `/decision`) can set `APPROVED`/`REJECTED`; `PASS_WITH_WARNINGS` needs `acknowledgeWarnings`. There is no publish state, tool or endpoint.
+- **Visual identity:** Jovi's appearance anchors (face, hair, eyes, beauty mark…) are not locked yet (see `knowledge/jovi/visual-bible.md`), so identity QA is `BLOCKED` until a human records a locked `visual_identity_versions` row. Agents can read it but never write it.
+
+ComfyUI setup: set `COMFYUI_URL`, export your workflow with *Save (API)*, replace the prompt/size/seed/prefix inputs with the placeholders listed in `.env.example`, and point `COMFYUI_IMAGE_WORKFLOW` / `COMFYUI_VIDEO_WORKFLOW` at the files. Check with `npm run jovi:providers`.
+
+## Known limitations (Phase 8)
+
+- Google Flow, voice synthesis and editing/rendering are **not integrated** (contracts only; assets `BLOCKED`). ComfyUI has been tested only against a fake ComfyUI HTTP server, never a real instance.
+- Visual identity consistency cannot be verified automatically (no visual inspector); it is a human review item.
+- The Phase 8 text agents have not been run against a real model in this repository's CI (see `npm run test:production:real`).
+- No real-model run is part of CI (see `npm run test:lmstudio:real`).
 - One model per provider is routed (a second loaded LM Studio model is not yet used as an independent evaluator).
 - Semantic memory is a lexical baseline; model competition is availability-only; goal tiering is a keyword heuristic; pricing figures are estimates.
-- No dashboard, publishing, image/video generation, analytics ingestion or n8n integration yet.
+- No dashboard, publishing, analytics ingestion or n8n integration yet.

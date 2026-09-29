@@ -12,6 +12,8 @@ import { assessCompetition } from '../../src/models/competition/model-competitio
 import { EvaluableOptionSchema } from '../../src/models/evaluator/rule-checks.js';
 import { EventType, MemoryType } from '../../src/types/enums.js';
 import { ExpensiveCallLimiter } from './security.js';
+import { ProductionRequestSchema } from '../../src/agents/production/production-pipeline.js';
+import { HumanDecisionSchema, type ArtifactKind } from '../../src/core/production/production-service.js';
 
 const IdParams = z.object({ id: z.string().min(1).max(100) });
 
@@ -103,11 +105,13 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
       status: 'ok',
       service: 'jovi-core',
       version: '0.1.0',
-      phase: 7,
+      phase: 8,
       database: 'ok',
       simulationMode: core.providers.isSimulation(),
       providers: statuses.map((s) => ({ provider: s.provider, kind: s.kind, available: s.available, model: s.selectedModel, reason: s.reason })),
       lmStudio: statuses.find((s) => s.provider === 'lmstudio')?.details ?? { registered: false },
+      mediaProviders: (await core.mediaProviders.statuses()).map((m) => ({ provider: m.provider, mediaKind: m.mediaKind, kind: m.kind, available: m.available, state: m.state, reason: m.reason })),
+      mediaSimulationMode: core.mediaProviders.isSimulation(),
       anyModelAvailable: statuses.some((s) => s.available),
       uptimeSeconds: Math.round(process.uptime()),
     };
@@ -143,6 +147,67 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
     const body = PlanningBody.parse(request.body ?? {});
     return guarded(request.ip, () => core.planning.execute({ ...body, createdBy: 'api' }));
   });
+
+  // --- Phase 8: creative production (ends at the human approval boundary) ----
+
+  app.post('/api/productions', async (request, reply) => {
+    const body = ProductionRequestSchema.parse(request.body ?? {});
+    const result = await guarded(request.ip, () => core.production.start({ ...body, createdBy: 'api' }));
+    if (body.mode === 'async') return reply.code(202).send(result);
+    if (result.status === 'FAILED') return reply.code(result.productionId ? 500 : 422).send(result);
+    return reply.code(200).send(result);
+  });
+
+  app.get('/api/productions/:id', async (request) => {
+    const { id } = IdParams.parse(request.params);
+    return core.production.getResult(id);
+  });
+
+  const artifactRoutes: Array<[string, ArtifactKind]> = [
+    ['script', 'SCRIPT'],
+    ['storyboard', 'STORYBOARD'],
+    ['visual-prompts', 'VISUAL_PROMPTS'],
+    ['edit-plan', 'EDIT_PLAN'],
+    ['qa', 'QA_REPORT'],
+  ];
+  for (const [path, kind] of artifactRoutes) {
+    app.get(`/api/productions/:id/${path}`, async (request, reply) => {
+      const { id } = IdParams.parse(request.params);
+      core.productions.get(id);
+      const artifact = core.productions.latestArtifact(id, kind);
+      if (!artifact) return reply.code(404).send({ error: 'NOT_FOUND', message: `${kind} not produced yet for ${id}` });
+      return { productionId: id, kind, artifact };
+    });
+  }
+
+  app.get('/api/productions/:id/assets', async (request) => {
+    const { id } = IdParams.parse(request.params);
+    core.productions.get(id);
+    return { productionId: id, assets: core.assets.list(id) };
+  });
+
+  app.get('/api/productions/:id/publishing-gate', async (request) => {
+    const { id } = IdParams.parse(request.params);
+    return core.productions.publishingGate(id);
+  });
+
+  /**
+   * Human approval boundary. Records a human reviewer's decision; it never
+   * publishes (there is no publishing endpoint in Phase 8). FAIL/BLOCKED QA
+   * results cannot be approved (409).
+   */
+  app.post('/api/productions/:id/decision', async (request) => {
+    const { id } = IdParams.parse(request.params);
+    const decision = HumanDecisionSchema.parse(request.body ?? {});
+    const production = core.productions.get(id);
+    const updated = core.productions.recordHumanDecision(id, decision, core.events.scope(production.correlationId));
+    return { production: updated, publishingGate: core.productions.publishingGate(id) };
+  });
+
+  app.get('/api/media/providers', async () => ({
+    simulationMode: core.mediaProviders.isSimulation(),
+    providers: await core.mediaProviders.statuses(),
+  }));
 
   app.get('/api/jovi/goal/:id', async (request) => {
     const { id } = IdParams.parse(request.params);

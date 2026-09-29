@@ -82,5 +82,63 @@ export const EventType = z.enum([
   'AGENT_COMPLETED',
   'AGENT_FAILED',
   'EVALUATION_COMPLETED',
+  // Phase 8 — creative production
+  'CREATIVE_PRODUCTION_STARTED',
+  'CREATIVE_PRODUCTION_STAGE_CHANGED',
+  'SCRIPT_CREATED',
+  'STORYBOARD_CREATED',
+  'VISUAL_PROMPT_CREATED',
+  'IMAGE_GENERATION_REQUESTED',
+  'IMAGE_GENERATED',
+  'VIDEO_GENERATION_REQUESTED',
+  'VIDEO_GENERATED',
+  'VOICE_GENERATION_REQUESTED',
+  'VOICE_GENERATED',
+  'RENDER_GENERATION_REQUESTED',
+  'RENDER_GENERATED',
+  'ASSET_GENERATION_FAILED',
+  'ASSET_BLOCKED',
+  'ASSET_SIMULATED',
+  'ASSET_REJECTED',
+  'EDITING_PLAN_CREATED',
+  'QA_STARTED',
+  'QA_COMPLETED',
+  'CREATIVE_PRODUCTION_COMPLETED',
+  'CREATIVE_PRODUCTION_BLOCKED',
+  'CREATIVE_PRODUCTION_FAILED',
+  'PRODUCTION_APPROVED',
+  'PRODUCTION_REJECTED',
 ]);
+
+/** Kinds of media a production can require. */
+export const MediaKind = z.enum(['IMAGE', 'VIDEO', 'VOICE', 'RENDER']);
+export type MediaKind = z.infer<typeof MediaKind>;
+
+/**
+ * Media asset lifecycle. A prompt is never an asset: only a provider call that
+ * returned a real, verifiable output may reach COMPLETED. SIMULATED marks
+ * simulation-mode output and is never publishable.
+ */
+export const AssetStatus = z.enum(['REQUESTED', 'QUEUED', 'GENERATING', 'COMPLETED', 'SIMULATED', 'FAILED', 'BLOCKED', 'REJECTED']);
+export type AssetStatus = z.infer<typeof AssetStatus>;
+
+/** Creative production lifecycle. Phase 8 ends at the human approval boundary. */
+export const ProductionStatus = z.enum([
+  'CREATED',
+  'SCRIPTING',
+  'STORYBOARDING',
+  'PROMPTING',
+  'GENERATING_ASSETS',
+  'EDITING',
+  'QA',
+  'AWAITING_HUMAN_APPROVAL',
+  'APPROVED',
+  'REJECTED',
+  'BLOCKED',
+  'FAILED',
+]);
+export type ProductionStatus = z.infer<typeof ProductionStatus>;
+
+export const QAStatus = z.enum(['PASS', 'PASS_WITH_WARNINGS', 'FAIL', 'BLOCKED']);
+export type QAStatus = z.infer<typeof QAStatus>;
 export type EventType = z.infer<typeof EventType>;

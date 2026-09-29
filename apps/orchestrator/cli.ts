@@ -15,8 +15,14 @@ Usage:
   npm run jovi -- --json "<goal>"           Print the raw JSON result
   npm run jovi -- --providers               Show model provider status (incl. LM Studio discovery)
   npm run jovi -- --identity                Show Jovi's active identity
-  npm run jovi -- --plan "<goal>"             Run Research → Trends → Strategy → Ideation
-  npm run jovi -- --simulate "<goal>"       SIMULATION: canned mock output only, no real providers
+  npm run jovi -- --plan "<goal>"           Run Research → Trends → Strategy → Ideation
+  npm run jovi -- --produce "<goal>"        Plan, then produce the recommended idea (script → … → QA)
+  npm run jovi -- --produce --from-plan <planningTaskId> [--idea <ideaId>]
+                                            Produce an idea from an existing Phase 7 planning task
+  npm run jovi -- --production <productionId>          Show a production's status, assets and QA
+  npm run jovi -- --decide <productionId> --decision APPROVE|REJECT --reviewer "<name>" [--acknowledge-warnings]
+                                            Record a HUMAN approval decision (never publishes)
+  npm run jovi -- --simulate ...            SIMULATION: canned mock output + simulated media only
 
 Configuration is read from the environment and .env (see .env.example).
 Logs go to stderr (level via JOVI_LOG_LEVEL, default "warn" for the CLI).
@@ -33,6 +39,15 @@ async function main(): Promise<number> {
       providers: { type: 'boolean', default: false },
       identity: { type: 'boolean', default: false },
       plan: { type: 'boolean', default: false },
+      produce: { type: 'boolean', default: false },
+      'from-plan': { type: 'string' },
+      idea: { type: 'string' },
+      'aspect-ratio': { type: 'string' },
+      production: { type: 'string' },
+      decide: { type: 'string' },
+      decision: { type: 'string' },
+      reviewer: { type: 'string' },
+      'acknowledge-warnings': { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -55,8 +70,23 @@ async function main(): Promise<number> {
       return 0;
     }
 
+    if (values.production) {
+      printProduction(core.production.getResult(values.production), values.json);
+      return 0;
+    }
+    if (values.decide) {
+      const production = core.productions.get(values.decide);
+      const updated = core.productions.recordHumanDecision(
+        values.decide,
+        { decision: (values.decision ?? '').toUpperCase() as 'APPROVE' | 'REJECT', reviewer: values.reviewer ?? '', acknowledgeWarnings: values['acknowledge-warnings'] },
+        core.events.scope(production.correlationId),
+      );
+      process.stdout.write(`${JSON.stringify({ production: { id: updated.id, status: updated.status, approvedBy: updated.approvedBy }, publishingGate: core.productions.publishingGate(updated.id) }, null, 2)}\n`);
+      return 0;
+    }
+
     const goal = positionals.join(' ').trim();
-    if (!goal) {
+    if (!goal && !(values.produce && values['from-plan'])) {
       process.stderr.write(USAGE);
       return 1;
     }
@@ -73,6 +103,17 @@ async function main(): Promise<number> {
       );
       await printProviders(core);
       return 2;
+    }
+
+    if (values.produce) {
+      const result = await core.production.start({
+        ...(values['from-plan'] ? { planningTaskId: values['from-plan'], ...(values.idea ? { ideaId: values.idea } : {}) } : { goal }),
+        ...(values['aspect-ratio'] ? { aspectRatio: values['aspect-ratio'] as '9:16' } : {}),
+        ...(localOnly ? { privacy: 'LOCAL_ONLY' as const } : {}),
+        createdBy: 'cli',
+      });
+      printProduction(result, values.json);
+      return result.status === 'COMPLETED' ? 0 : 1;
     }
 
     if (values.plan) {
@@ -114,8 +155,41 @@ async function printProviders(core: JoviCore): Promise<number> {
     process.stdout.write(`  selectedModel:   ${lm.selectedModel ?? '-'}\n`);
     process.stdout.write(`  loaded:          ${lm.loaded === null ? 'unknown' : lm.loaded}\n`);
   }
+  const media = await core.mediaProviders.statuses();
+  process.stdout.write(`\nMedia providers${core.mediaProviders.isSimulation() ? ' (SIMULATION MODE)' : ''}\n`);
+  for (const m of media) {
+    process.stdout.write(`  ${m.available ? '●' : '○'} ${m.provider.padEnd(16)} ${m.mediaKind.padEnd(6)} ${m.state.padEnd(15)} ${m.reason}\n`);
+  }
+  for (const kind of ['IMAGE', 'VIDEO', 'VOICE', 'RENDER'] as const) {
+    if (!media.some((m) => m.mediaKind === kind)) process.stdout.write(`  ○ ${'(none)'.padEnd(16)} ${kind.padEnd(6)} NOT_CONFIGURED  no ${kind.toLowerCase()} provider is registered\n`);
+  }
   process.stdout.write('\n');
   return 0;
+}
+
+function printProduction(r: ReturnType<JoviCore['production']['getResult']>, json: boolean | undefined): void {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);
+    return;
+  }
+  const out: string[] = [''];
+  if (r.simulated) out.push('*** SIMULATION — canned text and simulated media, NOT real generation ***');
+  out.push(`Creative production — task ${r.status} · production ${r.productionStatus ?? '-'} · QA ${r.qaStatus ?? '-'}`);
+  out.push(`  production ${r.productionId ?? '-'} · task ${r.taskId ?? '-'} · attempts ${r.attempts}`);
+  if (r.source) out.push(`  idea ${r.source.ideaId} "${r.source.ideaTitle}" (${r.source.type}${r.source.planningTaskId ? ` from ${r.source.planningTaskId}` : ''})`);
+  out.push(`  artifacts: ${Object.entries(r.artifacts).map(([k, v]) => `${k}${v ? '✓' : '✗'}`).join(' ')}`);
+  out.push('  assets:');
+  for (const a of r.assets) out.push(`    - ${a.kind.padEnd(6)} ${String(a.sceneId ?? '-').padEnd(5)} ${a.status.padEnd(10)} ${a.provider ?? '-'}${a.reason ? ` — ${a.reason}` : ''}`);
+  if (r.qa) {
+    out.push(`  QA: ${r.qa.status} → ${r.qa.recommendedAction}`);
+    for (const fix of r.qa.requiredFixes) out.push(`    • ${fix}`);
+  }
+  if (r.publishingGate) {
+    out.push(`  publishing gate: eligibleForHumanPublishing=${r.publishingGate.eligibleForHumanPublishing}, autonomousPublishingAllowed=false`);
+    for (const b of r.publishingGate.blockers) out.push(`    • ${b}`);
+  }
+  if (r.error) out.push(`  error: ${JSON.stringify(r.error)}`);
+  process.stdout.write(`${out.join('\n')}\n`);
 }
 
 function printResult(r: GoalExecutionResult): void {

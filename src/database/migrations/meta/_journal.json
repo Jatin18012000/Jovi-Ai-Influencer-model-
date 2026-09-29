@@ -15,6 +15,13 @@
       "when": 1790676537650,
       "tag": "0001_agent_tool_calls",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790685214160,
+      "tag": "0002_phase8_creative_production",
+      "breakpoints": true
     }
   ]
 }

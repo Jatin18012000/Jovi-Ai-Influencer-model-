@@ -119,9 +119,11 @@ describe('Fastify API', () => {
     const agents = await app.inject({ method: 'GET', url: '/api/agents' });
     const list = agents.json().agents as Array<{ name: string; status: string; permissionLevel: string }>;
     expect(list.find((a) => a.name === 'executive')).toMatchObject({ status: 'ACTIVE', permissionLevel: 'LEVEL_2_MODIFY' });
-    expect(list.filter((a) => a.status === 'PLANNED').map((a) => a.name)).toEqual(
-      expect.arrayContaining(['research', 'trends', 'strategy', 'ideation', 'script', 'visual', 'qa', 'publishing', 'analytics', 'learning']),
+    // Phase 7 planning and Phase 8 production agents are ACTIVE; only roadmap agents remain PLANNED.
+    expect(list.filter((a) => a.status === 'ACTIVE').map((a) => a.name)).toEqual(
+      expect.arrayContaining(['research', 'trends', 'strategy', 'ideation', 'script', 'storyboard', 'visual-prompt', 'image-generation', 'video-generation', 'voice', 'editing', 'qa']),
     );
+    expect(list.filter((a) => a.status === 'PLANNED').map((a) => a.name).sort()).toEqual(['analytics', 'learning', 'publishing']);
     expect(agents.json().permissionCeiling).toBe('LEVEL_3_EXECUTE');
   });
 

@@ -4,6 +4,15 @@ import type { ToolServices } from '../agents/toolkit.js';
 import { ExecutiveAgent } from '../agents/executive/executive-agent.js';
 import { CreatorPlanningPipeline, IdeationAgent, ResearchAgent, StrategyAgent, TrendsAgent } from '../agents/planning/planning-agents.js';
 import { PLANNED_AGENTS } from '../agents/planned-agents.js';
+import { CreativeProductionPipeline } from '../agents/production/production-pipeline.js';
+import { MediaProviderRegistry } from '../media/media-provider-registry.js';
+import { MediaStore } from '../media/media-store.js';
+import { createMediaProvidersFromConfig } from '../media/providers/index.js';
+import type { AnyMediaProvider } from '../media/types.js';
+import { VisualIdentityService } from './identity/visual-identity.js';
+import { AssetService } from './production/asset-service.js';
+import { MediaService } from './production/media-service.js';
+import { ProductionService } from './production/production-service.js';
 import { openDatabase, runMigrations, type DatabaseHandle } from '../database/client.js';
 import { seedDatabase, type SeedReport } from '../database/seed.js';
 import { KnowledgeBase } from '../memory/knowledge/knowledge-base.js';
@@ -32,6 +41,8 @@ export interface CreateCoreOptions {
   config?: JoviConfig;
   /** Replaces the configured providers entirely (tests, custom deployments). */
   providers?: ModelProvider[];
+  /** Replaces the configured media providers entirely (tests, custom deployments). */
+  mediaProviders?: AnyMediaProvider[];
   logger?: Logger;
   /** Override for job retry sleeping (tests). */
   sleep?: (ms: number) => Promise<void>;
@@ -58,6 +69,13 @@ export interface JoviCore {
   router: ModelRouter;
   evaluator: Evaluator;
   contextEngine: ContextEngine;
+  visualIdentity: VisualIdentityService;
+  mediaStore: MediaStore;
+  mediaProviders: MediaProviderRegistry;
+  assets: AssetService;
+  media: MediaService;
+  productions: ProductionService;
+  production: CreativeProductionPipeline;
   agents: AgentRegistry;
   runner: AgentRunner;
   executive: ExecutiveAgent;
@@ -107,6 +125,16 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   const evaluator = new Evaluator(router, prompts, db, logger.child({ component: 'evaluator' }));
   const contextEngine = new ContextEngine({ identity, strategy, memory, knowledge, semantic, decisions, providers });
 
+  // Phase 8: visual identity, media providers, assets and productions.
+  const visualIdentity = new VisualIdentityService(db);
+  if (config.database.autoSeed) visualIdentity.seed();
+  const mediaStore = new MediaStore(config.media.dir);
+  const mediaProviders = new MediaProviderRegistry();
+  for (const provider of options.mediaProviders ?? createMediaProvidersFromConfig(config, mediaStore)) mediaProviders.register(provider);
+  const assets = new AssetService(db);
+  const media = new MediaService(mediaProviders, assets, mediaStore, logger.child({ component: 'media' }), config.media.maxAttempts);
+  const productions = new ProductionService(db, assets);
+
   // Agents receive no services: only the runner holds them, behind the ToolKit.
   const executive = new ExecutiveAgent(prompts);
   const agents = new AgentRegistry();
@@ -124,6 +152,10 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
     router,
     evaluator,
     contextEngine,
+    visualIdentity,
+    assets,
+    production: productions,
+    media,
     agentDirectory: () => agents.list().map(({ definition, status }) => ({ name: definition.name, permissionLevel: definition.permissionLevel, status })),
   };
   const runner = new AgentRunner(db, logger.child({ component: 'agents' }), config.permissions.maxLevel, toolServices);
@@ -132,6 +164,24 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   for (const agent of planningAgents) agents.register(agent);
   agents.syncToDatabase(db);
   const planning = new CreatorPlanningPipeline({ tasks, events, runner });
+  const production = new CreativeProductionPipeline({
+    tasks,
+    jobs,
+    events,
+    runner,
+    productions,
+    assets,
+    media,
+    identity,
+    visualIdentity,
+    strategy,
+    planning,
+    prompts,
+    isSimulation: () => providers.isSimulation() || mediaProviders.isSimulation(),
+    logger: logger.child({ component: 'production' }),
+  });
+  for (const agent of production.allAgents()) agents.register(agent);
+  agents.syncToDatabase(db);
 
   // Crash recovery on every start (after job handlers are registered).
   const jobRecovery = await jobs.recoverStale(config.jobs.staleMs);
@@ -167,6 +217,13 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
     router,
     evaluator,
     contextEngine,
+    visualIdentity,
+    mediaStore,
+    mediaProviders,
+    assets,
+    media,
+    productions,
+    production,
     agents,
     runner,
     executive,

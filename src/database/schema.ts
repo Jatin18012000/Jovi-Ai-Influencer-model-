@@ -302,3 +302,107 @@ export const memoryItems = sqliteTable(
   },
   (t) => [uniqueIndex('memory_items_type_key_uq').on(t.type, t.key), index('memory_items_importance_idx').on(t.importance)],
 );
+
+// ---------------------------------------------------------------------------
+// Phase 8 — visual identity, creative production, media assets
+// ---------------------------------------------------------------------------
+
+/**
+ * Versioned, human-approved visual identity (face, hair, eyes, marks, body,
+ * age appearance, signature style). Agents can read it; only a human action
+ * (VisualIdentityService.createVersion with approvedBy) can change it.
+ */
+export const visualIdentityVersions = sqliteTable(
+  'visual_identity_versions',
+  {
+    id: text('id').primaryKey(),
+    identityId: text('identity_id').notNull(),
+    version: integer('version').notNull(),
+    status: text('status', { enum: ['NOT_LOCKED', 'LOCKED'] }).notNull(),
+    isActive: integer('is_active', { mode: 'boolean' }).notNull(),
+    profile: text('profile', { mode: 'json' }).$type<Json>().notNull(),
+    approvedBy: text('approved_by').notNull(),
+    changeSummary: text('change_summary').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex('visual_identity_version_uq').on(t.identityId, t.version)],
+);
+
+export const productions = sqliteTable(
+  'productions',
+  {
+    id: text('id').primaryKey(),
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    correlationId: text('correlation_id').notNull(),
+    /** Where the idea came from: a Phase 7 planning task, or a direct request. */
+    sourceType: text('source_type', { enum: ['PLANNING', 'DIRECT'] }).notNull(),
+    sourcePlanningTaskId: text('source_planning_task_id'),
+    ideaId: text('idea_id').notNull(),
+    idea: text('idea', { mode: 'json' }).$type<Json>().notNull(),
+    productionContext: text('production_context', { mode: 'json' }).$type<Json>().notNull(),
+    status: text('status').notNull(),
+    identityVersion: integer('identity_version').notNull(),
+    visualIdentityVersion: integer('visual_identity_version').notNull(),
+    qaStatus: text('qa_status'),
+    simulated: integer('simulated', { mode: 'boolean' }).notNull().default(false),
+    approvalDecision: text('approval_decision'),
+    approvedBy: text('approved_by'),
+    approvalNote: text('approval_note'),
+    decidedAt: text('decided_at'),
+    error: text('error', { mode: 'json' }).$type<Json>(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index('productions_task_idx').on(t.taskId), index('productions_status_idx').on(t.status)],
+);
+
+export const productionArtifacts = sqliteTable(
+  'production_artifacts',
+  {
+    id: text('id').primaryKey(),
+    productionId: text('production_id')
+      .notNull()
+      .references(() => productions.id),
+    kind: text('kind', { enum: ['SCRIPT', 'STORYBOARD', 'VISUAL_PROMPTS', 'EDIT_PLAN', 'QA_REPORT'] }).notNull(),
+    version: integer('version').notNull(),
+    content: text('content', { mode: 'json' }).$type<Json>().notNull(),
+    agentRunId: text('agent_run_id'),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex('production_artifacts_kind_version_uq').on(t.productionId, t.kind, t.version)],
+);
+
+export const mediaAssets = sqliteTable(
+  'media_assets',
+  {
+    id: text('id').primaryKey(),
+    productionId: text('production_id')
+      .notNull()
+      .references(() => productions.id),
+    kind: text('kind', { enum: ['IMAGE', 'VIDEO', 'VOICE', 'RENDER'] }).notNull(),
+    sceneId: text('scene_id'),
+    status: text('status').notNull(),
+    statusReason: text('status_reason'),
+    provider: text('provider'),
+    providerKind: text('provider_kind'),
+    model: text('model'),
+    request: text('request', { mode: 'json' }).$type<Json>().notNull(),
+    sourceAssetIds: text('source_asset_ids', { mode: 'json' }).$type<string[]>().notNull(),
+    location: text('location'),
+    mimeType: text('mime_type'),
+    durationSeconds: real('duration_seconds'),
+    width: integer('width'),
+    height: integer('height'),
+    aspectRatio: text('aspect_ratio'),
+    providerJobId: text('provider_job_id'),
+    attempts: integer('attempts').notNull().default(0),
+    cost: text('cost', { mode: 'json' }).$type<Json>(),
+    simulated: integer('simulated', { mode: 'boolean' }).notNull().default(false),
+    metadata: text('metadata', { mode: 'json' }).$type<Json>(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index('media_assets_production_idx').on(t.productionId), index('media_assets_status_idx').on(t.status)],
+);

@@ -2,6 +2,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { loadConfig } from '../../core/config/config.js';
 import { openDatabase, resolveDatabasePath, runMigrations } from '../client.js';
 import { seedDatabase } from '../seed.js';
+import { VisualIdentityService } from '../../core/identity/visual-identity.js';
 import { loadEnvFile } from '../../core/config/load-env.js';
 
 /** `npm run db:reset` — deletes the local SQLite database and recreates it (development only). */
@@ -19,5 +20,5 @@ if (path !== ':memory:') {
 }
 const handle = openDatabase(config.database.url);
 runMigrations(handle);
-console.log(`Reset ${handle.url}:`, seedDatabase(handle));
+console.log(`Reset ${handle.url}:`, { ...seedDatabase(handle), visualIdentity: new VisualIdentityService(handle.db).seed() ? 'created' : 'exists' });
 handle.close();

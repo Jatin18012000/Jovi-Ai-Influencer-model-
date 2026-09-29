@@ -86,6 +86,15 @@ const EnvSchema = z.object({
   JOVI_GOAL_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(10),
   JOVI_MAX_CONCURRENT_GOALS: z.coerce.number().int().positive().default(2),
 
+  /** Phase 8 media. ComfyUI is optional; unset = image/video providers report NOT_CONFIGURED. */
+  COMFYUI_URL: optionalString,
+  COMFYUI_IMAGE_WORKFLOW: optionalString,
+  COMFYUI_VIDEO_WORKFLOW: optionalString,
+  COMFYUI_TIMEOUT_MS: z.coerce.number().int().positive().default(900_000),
+  /** Where provider outputs are written (relative to the project root). */
+  JOVI_MEDIA_DIR: z.string().default('data/media'),
+  JOVI_MEDIA_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(2),
+
   JOVI_LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 });
 
@@ -127,6 +136,14 @@ export type JoviConfig = {
     allowUnauthenticatedNetwork: boolean;
     goalRateLimitPerMinute: number;
     maxConcurrentGoals: number;
+  };
+  media: {
+    comfyuiUrl: string | undefined;
+    comfyuiImageWorkflow: string | undefined;
+    comfyuiVideoWorkflow: string | undefined;
+    comfyuiTimeoutMs: number;
+    dir: string;
+    maxAttempts: number;
   };
   logLevel: z.infer<typeof EnvSchema>['JOVI_LOG_LEVEL'];
   /** Human-readable configuration warnings (e.g. obsolete variables). */
@@ -176,6 +193,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
       allowUnauthenticatedNetwork: parsed.JOVI_ALLOW_UNAUTHENTICATED_NETWORK,
       goalRateLimitPerMinute: parsed.JOVI_GOAL_RATE_LIMIT_PER_MINUTE,
       maxConcurrentGoals: parsed.JOVI_MAX_CONCURRENT_GOALS,
+    },
+    media: {
+      comfyuiUrl: parsed.COMFYUI_URL,
+      comfyuiImageWorkflow: parsed.COMFYUI_IMAGE_WORKFLOW,
+      comfyuiVideoWorkflow: parsed.COMFYUI_VIDEO_WORKFLOW,
+      comfyuiTimeoutMs: parsed.COMFYUI_TIMEOUT_MS,
+      dir: parsed.JOVI_MEDIA_DIR,
+      maxAttempts: parsed.JOVI_MEDIA_MAX_ATTEMPTS,
     },
     logLevel: parsed.JOVI_LOG_LEVEL,
     warnings,

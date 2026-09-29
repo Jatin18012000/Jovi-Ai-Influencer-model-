@@ -13,6 +13,10 @@ export const IdPrefix = {
   evaluation: 'evl',
   identityVersion: 'idv',
   strategyVersion: 'stv',
+  visualIdentityVersion: 'viv',
+  production: 'prd',
+  artifact: 'art',
+  asset: 'ast',
 } as const;
 
 export type IdKind = keyof typeof IdPrefix;

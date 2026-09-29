@@ -1,6 +1,7 @@
 import { createJoviCore, type JoviCore } from '../src/core/bootstrap.js';
 import { loadConfig } from '../src/core/config/config.js';
 import { mockExecutiveProposal, MockProvider } from '../src/models/providers/mock-provider.js';
+import type { AnyMediaProvider } from '../src/media/types.js';
 import type { GenerateRequest, ModelProvider } from '../src/models/types.js';
 
 export const TEST_GOAL = 'Create an Instagram Reel concept for Jovi that introduces her personality to a new audience.';
@@ -10,7 +11,7 @@ export const TEST_GOAL = 'Create an Instagram Reel concept for Jovi that introdu
  * providers. No network, no API keys, no local model.
  */
 export async function createTestCore(
-  options: { providers?: ModelProvider[]; env?: Record<string, string> } = {},
+  options: { providers?: ModelProvider[]; env?: Record<string, string>; mediaProviders?: AnyMediaProvider[] } = {},
 ): Promise<JoviCore> {
   const config = loadConfig({
     DATABASE_URL: ':memory:',
@@ -24,6 +25,7 @@ export async function createTestCore(
     config,
     providers: options.providers ?? [new MockProvider()],
     sleep: async () => {},
+    ...(options.mediaProviders ? { mediaProviders: options.mediaProviders } : {}),
   });
 }
 

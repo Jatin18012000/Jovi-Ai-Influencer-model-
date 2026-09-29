@@ -11,7 +11,12 @@ import type { SemanticDocument, SemanticMemory } from '../memory/semantic/semant
 import type { EvaluationRequest, Evaluator } from '../models/evaluator/evaluator.js';
 import type { ModelRouter, RoutingRequest, RunTrace } from '../models/router/model-router.js';
 import type { GenerateRequest } from '../models/types.js';
-import type { PermissionLevel } from '../types/enums.js';
+import type { MediaAsset } from '../core/production/asset-service.js';
+import type { MediaJob, MediaService } from '../core/production/media-service.js';
+import type { ArtifactKind, ProductionService } from '../core/production/production-service.js';
+import type { VisualIdentityService } from '../core/identity/visual-identity.js';
+import type { ImageGenerationRequest, RenderRequest, VideoGenerationRequest, VoiceGenerationRequest, AspectRatio } from '../media/types.js';
+import type { MediaKind, PermissionLevel } from '../types/enums.js';
 
 /** Services the ToolKit mediates. Agents never receive these directly. */
 export interface ToolServices {
@@ -24,6 +29,10 @@ export interface ToolServices {
   router: ModelRouter;
   evaluator: Evaluator;
   contextEngine: ContextEngine;
+  assets: import('../core/production/asset-service.js').AssetService;
+  visualIdentity: VisualIdentityService;
+  production: ProductionService;
+  media: MediaService;
   /** Read-only agent directory (name → declared permission level, status). */
   agentDirectory: () => ReadonlyArray<{ name: string; permissionLevel: PermissionLevel; status: string }>;
 }
@@ -71,6 +80,8 @@ export function createToolKit(services: ToolServices, guard: PermissionGuard, ru
 
     identity: {
       getActive: () => use('identity.read', () => services.identity.getActive()),
+      /** Read-only: agents can never change Jovi's (visual) identity. */
+      getVisual: () => use('identity.read', () => services.visualIdentity.getActive()),
     },
 
     strategy: {
@@ -78,7 +89,7 @@ export function createToolKit(services: ToolServices, guard: PermissionGuard, ru
     },
 
     knowledge: {
-      search: (query: string, limit?: number) => use('knowledge.read', () => services.knowledge.search(query, limit)),
+      search: (query: string, limit?: number, maxExcerpt?: number) => use('knowledge.read', () => services.knowledge.search(query, limit, maxExcerpt)),
     },
 
     memory: {
@@ -119,6 +130,27 @@ export function createToolKit(services: ToolServices, guard: PermissionGuard, ru
         return services.contextEngine.build(request);
       },
       render: (context: JoviContext) => services.contextEngine.render(context),
+    },
+
+    production: {
+      get: (productionId: string) => use('production.read', () => services.production.get(productionId)),
+      getArtifact: <T = unknown>(productionId: string, kind: ArtifactKind) => use('production.read', () => services.production.latestArtifact<T>(productionId, kind)),
+      listAssets: (productionId: string, kind?: MediaKind): MediaAsset[] => use('production.read', () => services.assets.list(productionId, kind)),
+      /** Stores a creative artifact (script, storyboard, prompts, edit plan, QA report). No status changes, no approval. */
+      saveArtifact: (productionId: string, kind: ArtifactKind, content: unknown) =>
+        use('production.write', () => services.production.saveArtifact(productionId, kind, content, run.trace('artifact').agentRunId ?? null, run.scope)),
+    },
+
+    /**
+     * Media generation. The agent can only *request* assets: MediaService owns
+     * the lifecycle, and only a verified provider result can complete an asset.
+     */
+    media: {
+      generateImage: (job: MediaJob<ImageGenerationRequest>) => use('media.image.generate', () => services.media.generateImage(job, run.scope)),
+      generateVideo: (job: MediaJob<VideoGenerationRequest>) => use('media.video.generate', () => services.media.generateVideo(job, run.scope)),
+      generateVoice: (job: MediaJob<VoiceGenerationRequest>) => use('media.voice.generate', () => services.media.generateVoice(job, run.scope)),
+      renderEdit: (job: MediaJob<RenderRequest>) => use('media.edit.render', () => services.media.renderEdit(job, run.scope)),
+      videoNeedsSourceImages: (aspectRatio: AspectRatio) => use('media.video.generate', () => services.media.videoNeedsSourceImages(aspectRatio)),
     },
 
     agents: {
