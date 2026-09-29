@@ -131,3 +131,38 @@ Checks fall into seven categories: identity, personality, brand, content, visual
 
 ### Next phase boundary
 Phase 9 would cover the publishing workflow for **human-approved** productions only. It would need LEVEL_4, platform API integration, scheduling and an explicit per-post human confirmation. Analytics ingestion would feed learning. Phase 8 deliberately stops at AWAITING_HUMAN_APPROVAL / APPROVED and contains no publishing code.
+
+## Real LM Studio Validation — 29 September 2026
+
+This section records a real run on the local machine. It supersedes the earlier statements in this note that the Phase 8 text agents had not been run against a real LM Studio model.
+
+**Classification: REAL LM STUDIO E2E: PASS**
+
+> This was not a clean run. Schema-output reliability and inference latency remain optimization areas.
+
+### Verified results
+- Phase 8 commit: `b698447`
+- Deterministic validation: 194 tests passed, 4 skipped
+- Typecheck: PASS
+- Build: PASS
+- Real test command:
+  `JOVI_LMSTUDIO_REAL=1 npx vitest run tests/integration/production.real.test.ts`
+- Real tests: 2/2 passed
+- Provider: `lmstudio`
+- Model: `google/gemma-4-12b-qat`
+- The real Phase 8 pipeline ran successfully against the local model.
+- Verified artifacts:
+  - Script
+  - Storyboard
+  - Visual prompts
+  - QA review
+- Total real-model test duration: approximately 1104.72 seconds (~18.4 minutes)
+
+### Observed issues
+1. A model output initially failed schema validation because storyboard `continuityNotes.0` exceeded the 250-character maximum.
+2. One LM Studio model run hit `[lmstudio] network error: fetch failed (Headers Timeout Error)` after about 301019 ms (~5 minutes).
+
+Despite these, the test completed with 2/2 tests passing.
+
+### Scope of this validation
+The validation covers only the Phase 8 **text** agents (script, storyboard, visual prompts, QA review) on the local model. **No real image, video, voice or editing/render provider has been validated.** ComfyUI is still tested only against a fake HTTP server, Google Flow remains NOT_INTEGRATED, and no voice or render engine exists. Media assets in this run were not produced by any real media provider.
