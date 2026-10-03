@@ -7,7 +7,7 @@
 # installs ffmpeg and pins it with JOVI_FFMPEG_PATH + JOVI_FFMPEG_SHA256.
 # Base images are pinned by digest (R-07): node:22-bookworm-slim (Node 22.23.3, resolved 2026-10-03).
 # Dependabot (docker ecosystem) proposes digest updates.
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS build
+FROM node:26-bookworm-slim@sha256:662933cf47f013bc8e4beb31a6116448427a82057ba7c42c97e4c5ba766504c2 AS build
 WORKDIR /app
 # Toolchain for better-sqlite3 in case no prebuilt binary matches the platform.
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
@@ -18,7 +18,7 @@ COPY apps ./apps
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS runtime
+FROM node:26-bookworm-slim@sha256:662933cf47f013bc8e4beb31a6116448427a82057ba7c42c97e4c5ba766504c2 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
