@@ -275,7 +275,12 @@ export class ProductionService {
   private approvalAttestationBlocker(production: Production): string | null {
     if (production.status !== 'APPROVED') return null;
     const event = this.audit.bus.list({ entityId: production.id, eventType: 'PRODUCTION_APPROVED', limit: 5 }).at(-1);
-    if (!event) return 'approval not attested: no PRODUCTION_APPROVED event exists for this production';
+    if (!event) {
+      const checkpoint = this.audit.bus.latestCheckpoint();
+      return checkpoint
+        ? 'approval not attested: no PRODUCTION_APPROVED event exists (it may have been removed by event retention; re-approve before publishing)'
+        : 'approval not attested: no PRODUCTION_APPROVED event exists for this production';
+    }
     if (event.source !== SOURCE || event.payload.reviewer !== production.approvedBy) {
       return `approval not attested: the approval event does not match the recorded approver (${production.approvedBy ?? 'none'})`;
     }

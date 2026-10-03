@@ -1,0 +1,12 @@
+# R-14: keep secrets, local data and build output out of the Docker build context.
+.env
+.env.*
+!.env.example
+data/
+node_modules/
+dist/
+.git/
+coverage/
+*.db
+*.db-*
+docs/audit/poc/*.json

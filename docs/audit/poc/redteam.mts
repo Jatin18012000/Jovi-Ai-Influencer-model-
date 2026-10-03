@@ -2,13 +2,14 @@
  * JOVI CREATOR OS — SAFE RED-TEAM HARNESS (audit evidence, not a test suite)
  *
  *   npx tsx docs/audit/poc/redteam.mts            # prints a JSON report
- *   npx tsx docs/audit/poc/redteam.mts --write     # also writes docs/audit/poc/redteam-results-after-p1.json
+ *   npx tsx docs/audit/poc/redteam.mts --write     # also writes docs/audit/poc/redteam-results-after-p2.json
  *
  * Updated after the P0 remediations (R-01..R-04): legitimate calls use scoped
  * credentials; attacks stay unauthenticated, spoofed or under-scoped. The
  * original audit run (commit 43725c5) is kept in redteam-results.json, the
- * P0 re-run (commit 35802ca) in redteam-results-after-p0.json. Updated again
- * after the P1 remediations (R-05..R-08).
+ * P0 re-run (commit 35802ca) in redteam-results-after-p0.json, the P1 re-run
+ * (commit 67a4783) in redteam-results-after-p1.json. Updated again after the
+ * P2 remediations (R-09..R-19).
  *
  * Safety: in-memory SQLite, temporary directories under the OS temp dir,
  * an API server bound to 127.0.0.1 on an ephemeral port, deterministic mock /
@@ -216,13 +217,20 @@ async function main() {
       publishLikeMethods: paths.filter((p) => /publish|infra|shell|exec|approve/i.test(p)),
     });
 
-    // RT-04b Confused deputy: production.write is not scoped by artifact kind.
+    // RT-04b Confused deputy: can the script agent write the QA report (and set qaStatus)?
     const scope = c.events.scope(newId('correlation'));
     const task = c.tasks.create({ type: 'CREATIVE_PRODUCTION', goal: 'probe', createdBy: 'redteam' }, scope);
     const p = c.productions.create({ taskId: task.id, sourceType: 'DIRECT', sourcePlanningTaskId: null, ideaId: 'i', idea: {}, productionContext: {}, identityVersion: 1, visualIdentityVersion: 1, simulated: false }, scope);
     const script = kit(SCRIPT_AGENT_DEFINITION as never);
-    script.production.saveArtifact(p.id, 'QA_REPORT', { status: 'PASS' });
-    record('RT-04b', 'Script agent (production.write) can write a QA_REPORT and set qaStatus=PASS (tool not scoped by artifact kind)', c.productions.get(p.id).qaStatus === 'PASS' ? 'VULNERABLE' : 'HELD', {
+    let qaWrite = 'ALLOWED';
+    try {
+      script.production.saveArtifact(p.id, 'QA_REPORT', { status: 'PASS' });
+    } catch (e) {
+      qaWrite = (e as Error).name;
+    }
+    record('RT-04b', 'Artifact writes are scoped per kind: the script agent cannot write a QA_REPORT (and set qaStatus)', c.productions.get(p.id).qaStatus === 'PASS' ? 'VULNERABLE' : 'HELD', {
+      scriptAgentQaReportWrite: qaWrite,
+      scriptAgentWriteTools: (SCRIPT_AGENT_DEFINITION.allowedTools as readonly string[]).filter((t) => t.startsWith('production.write')),
       qaStatusAfter: c.productions.get(p.id).qaStatus,
       note: 'Not model-reachable: agents call tools from code, models cannot choose tools or artifact kinds. Approval still requires AWAITING_HUMAN_APPROVAL.',
     });
@@ -410,11 +418,21 @@ async function main() {
     mkdirSync(join(root, 'media', pid), { recursive: true });
     symlinkSync(join(root, 'outside-secret.txt'), join(root, 'media', pid, `${aid}.png`));
     const holdsSymlink = store.holdsFile(join(root, 'media', pid, `${aid}.png`));
+    symlinkSync(root, join(root, 'references', 'linked-dir'));
+    const viaSymlinkedDir = store.isReadableInput(join(root, 'references', 'linked-dir', 'outside-secret.txt'));
+    let readThroughSymlink = 'ALLOWED';
+    try {
+      store.readInput(join(root, 'references', 'innocent.png'));
+    } catch (e) {
+      readThroughSymlink = (e as Error).name;
+    }
     record('RT-08', 'Media-store path construction rejects traversal, absolute paths, bad extensions and null bytes', Object.values(traversal).every((v) => v === 'ValidationError') ? 'HELD' : 'VULNERABLE', traversal);
-    record('RT-09', 'Reference/media confinement uses lexical path checks; symlinks inside the allowed dirs escape them', viaSymlink || holdsSymlink ? 'VULNERABLE' : 'HELD', {
+    record('RT-09', 'Reference/media confinement resolves real paths and refuses symlinked files and directories', viaSymlink || holdsSymlink || viaSymlinkedDir || readThroughSymlink === 'ALLOWED' ? 'VULNERABLE' : 'HELD', {
       dotDotEscapeAccepted: outsideViaDots,
       symlinkInReferencesAccepted: viaSymlink,
       symlinkInMediaDirAccepted: holdsSymlink,
+      symlinkedDirectoryAccepted: viaSymlinkedDir,
+      readInputThroughSymlink: readThroughSymlink,
       precondition: 'ability to create a symlink in data/references or data/media (local write access)',
     });
   }
@@ -686,7 +704,7 @@ async function main() {
     const minorVisual = await app.inject({ method: 'POST', url: '/api/visual-identity', headers, payload: { profile: { ...LOCKED_PROFILE, apparentAge: 17 }, changeSummary: 'minor' } });
     const humanVisual = await app.inject({ method: 'POST', url: '/api/visual-identity', headers, payload: { profile: { ...LOCKED_PROFILE, isVirtualCharacter: false }, changeSummary: 'human' } });
     const realPerson = await app.inject({ method: 'POST', url: '/api/visual-identity', headers, payload: { profile: { ...LOCKED_PROFILE, face: 'exact lookalike of a famous pop star' }, changeSummary: 'likeness' } });
-    record('RT-19', 'Core identity has no write route; visual identity requires identity-admin and enforces age/virtual invariants, but not likeness', realPerson.statusCode === 201 ? 'PARTIAL' : 'HELD', {
+    record('RT-19', 'Core identity has no write route; visual identity requires identity-admin and refuses minors, non-virtual and real-person likeness', realPerson.statusCode === 201 ? 'PARTIAL' : 'HELD', {
       visualIdentityWithoutToken: unauthVisual.statusCode,
       identityWriteRoutes: routes.map((r) => r.statusCode),
       coreIdentityUnchanged: JSON.stringify(c.identity.getActive()) === before,
@@ -723,5 +741,5 @@ main()
     const report = { generatedAt: new Date().toISOString(), node: process.version, summary, results };
     const text = JSON.stringify(report, null, 2);
     process.stdout.write(`${text}\n`);
-    if (process.argv.includes('--write')) writeFileSync(new URL('./redteam-results-after-p1.json', import.meta.url), `${text}\n`);
+    if (process.argv.includes('--write')) writeFileSync(new URL('./redteam-results-after-p2.json', import.meta.url), `${text}\n`);
   });

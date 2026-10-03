@@ -89,3 +89,44 @@ jobs:
           tar -xzf gitleaks.tgz gitleaks
       - name: gitleaks (git history)
         run: ./gitleaks git . --redact --no-banner --config .gitleaks.toml
+
+  container:
+    name: Container (hardened compose)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image (digest-pinned base)
+        run: docker compose build
+      - name: Start with the compose hardening (read-only root, no capabilities, limits)
+        run: |
+          mkdir -p data && sudo chown 1000:1000 data
+          docker compose up -d
+      - name: Wait for /health
+        run: |
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:3000/health; then exit 0; fi
+            sleep 2
+          done
+          docker compose logs jovi-core | sed -E 's/jovi_[A-Za-z0-9_-]{43}/jovi_<redacted>/g'
+          exit 1
+      - name: Verify the hardening is in effect
+        run: |
+          id="$(docker compose ps -q jovi-core)"
+          docker inspect "$id" --format 'readonly={{.HostConfig.ReadonlyRootfs}} capdrop={{.HostConfig.CapDrop}} secopt={{.HostConfig.SecurityOpt}} memory={{.HostConfig.Memory}} pids={{.HostConfig.PidsLimit}} user={{.Config.User}}'
+          test "$(docker inspect "$id" --format '{{.HostConfig.ReadonlyRootfs}}')" = "true"
+          docker inspect "$id" --format '{{.HostConfig.CapDrop}}' | grep -q ALL
+          docker inspect "$id" --format '{{.HostConfig.SecurityOpt}}' | grep -q 'no-new-privileges:true'
+          test "$(docker inspect "$id" --format '{{.Config.User}}')" = "node"
+          if docker compose exec -T jovi-core sh -c 'touch /app/probe' 2>/dev/null; then echo "root filesystem is writable"; exit 1; fi
+          docker compose exec -T jovi-core sh -c 'touch /app/data/probe && rm /app/data/probe'
+          docker compose exec -T jovi-core sh -c 'stat -c "%a %n" /app/data /app/data/jovi.db'
+          test "$(docker compose exec -T jovi-core stat -c %a /app/data/jovi.db)" = "600"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/status)" = "401"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'host: evil.example' http://127.0.0.1:3000/health)" = "403"
+          docker compose logs jovi-core | grep -q 'OWNER credential was created'
+      - name: Stop
+        if: always()
+        run: docker compose down -v

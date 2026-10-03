@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
-import { basename } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { ProviderError } from '../core/errors.js';
+import { pinMismatch } from './integrity.js';
 
 /** R-08: one record per external process execution (arguments with paths redacted). */
 export interface ProcessExecutionRecord {
@@ -17,6 +18,18 @@ let auditSink: (record: ProcessExecutionRecord) => void = () => undefined;
 /** Installs the process-execution audit sink (bootstrap wires it to the logger). */
 export function setProcessAuditSink(sink: (record: ProcessExecutionRecord) => void): void {
   auditSink = sink;
+}
+
+const executablePins = new Map<string, string>();
+
+/**
+ * R-17: optional hash pins for operator-configured executables (absolute path →
+ * SHA-256). A pinned binary is verified before every execution; a mismatch
+ * (e.g. a replaced ffmpeg) refuses to run it.
+ */
+export function setExecutablePins(pins: Record<string, string | undefined>): void {
+  executablePins.clear();
+  for (const [path, hash] of Object.entries(pins)) if (hash) executablePins.set(resolve(path), hash.toLowerCase());
 }
 
 /** Replaces filesystem paths with `<path>/basename` so logs do not expose directory layouts or user names. */
@@ -57,7 +70,13 @@ export function runProcess(
       // auditing must never break media generation
     }
   };
-  return new Promise((resolve, reject) => {
+  const pinned = executablePins.get(resolve(binary));
+  const mismatch = pinned ? pinMismatch(resolve(binary), pinned) : null;
+  if (mismatch) {
+    audit(null, 'START_FAILED');
+    return Promise.reject(new ProviderError(provider, `refusing to run ${basename(binary)}: ${mismatch}`, { retryable: false, code: 'BINARY_HASH_MISMATCH' }));
+  }
+  return new Promise((resolvePromise, reject) => {
     let child;
     try {
       child = spawn(binary, args, { shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
@@ -92,7 +111,7 @@ export function runProcess(
         reject(new ProviderError(provider, `${binary} timed out after ${options.timeoutMs}ms`, { retryable: true, code: 'PROCESS_TIMEOUT' }));
         return;
       }
-      resolve({ code, stdout, stderr });
+      resolvePromise({ code, stdout, stderr });
     });
     child.stdin.on('error', () => undefined);
     if (options.stdin !== undefined) child.stdin.end(options.stdin);

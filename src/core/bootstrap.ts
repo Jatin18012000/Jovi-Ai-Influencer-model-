@@ -10,7 +10,7 @@ import { ApiCredentialService } from './auth/api-credentials.js';
 import { CloudBudget } from './budget/cloud-budget.js';
 import { MediaProviderRegistry } from '../media/media-provider-registry.js';
 import { MediaStore } from '../media/media-store.js';
-import { setProcessAuditSink } from '../media/process-runner.js';
+import { setExecutablePins, setProcessAuditSink } from '../media/process-runner.js';
 import { createMediaProvidersFromConfig } from '../media/providers/index.js';
 import type { AnyMediaProvider } from '../media/types.js';
 import { VisualIdentityService } from './identity/visual-identity.js';
@@ -40,6 +40,7 @@ import { TaskService } from './jobs/task-service.js';
 import { ContextEngine } from './orchestrator/context-engine.js';
 import { JoviOrchestrator } from './orchestrator/orchestrator.js';
 import { PromptLibrary } from './prompts/prompt-library.js';
+import { RetentionService } from './retention/retention-service.js';
 import { StrategyService } from './strategy/strategy-service.js';
 
 export interface CreateCoreOptions {
@@ -63,6 +64,8 @@ export interface JoviCore {
   credentials: ApiCredentialService;
   /** R-05: daily cloud spend cap. */
   budget: CloudBudget;
+  /** R-18: retention and backups. */
+  retention: RetentionService;
   tasks: TaskService;
   jobs: JobQueue;
   worker: JobWorker;
@@ -108,10 +111,16 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   const events = new EventBus(sqlite, logger.child({ component: 'events' }));
   // R-08: the capability to emit protected (attesting) events goes only to the services that own them.
   const attestation = events.issueAttestation();
-  const credentials = new ApiCredentialService(db, events, { token: config.api.token, scopes: config.api.tokenScopes }, attestation);
+  const credentials = new ApiCredentialService(db, events, { token: config.api.token, previousToken: config.api.previousToken, scopes: config.api.tokenScopes }, attestation);
   // R-08: every external process execution is logged (binary, redacted arguments, duration, exit code).
   const processLogger = logger.child({ component: 'process' });
   setProcessAuditSink((record) => processLogger.info({ audit: 'PROCESS_EXECUTED', ...record }, 'external process executed'));
+  // R-17: optional hash pins for operator-configured executables.
+  setExecutablePins({
+    ...(config.media.ffmpegPath ? { [config.media.ffmpegPath]: config.media.pins.ffmpeg } : {}),
+    ...(config.media.ffprobePath ? { [config.media.ffprobePath]: config.media.pins.ffprobe } : {}),
+    [config.media.sayPath]: config.media.pins.say,
+  });
   // R-05: daily cloud spend cap shared by the model router and the media service.
   const budget = new CloudBudget(sqlite, config.budget.dailyCloudUsd);
   const tasks = new TaskService(db);
@@ -123,9 +132,13 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
     ...(options.sleep ? { sleep: options.sleep } : {}),
   });
   // R-05: the worker also garbage-collects files of superseded media once a day.
+  // R-05/R-18: the worker garbage-collects superseded media and applies data retention once a day.
+  const retention = new RetentionService(sqlite, events, config.retention);
   const worker = new JobWorker(jobs, logger.child({ component: 'worker' }), config.jobs.workerPollMs, config.jobs.staleMs, () => {
     const gc = media.collectSuperseded({ olderThanDays: config.media.supersededRetentionDays }, events.scope(newId('correlation')));
     if (gc.assets) logger.info({ ...gc }, 'superseded media collected');
+    const kept = retention.apply();
+    if (kept.events.pruned || kept.agentRuns || kept.modelRuns) logger.info({ ...kept }, 'retention applied');
   });
 
   const identity = new IdentityService(db);
@@ -150,7 +163,7 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   // Phase 8: visual identity, media providers, assets and productions.
   // Phase 9: capability-based provider selection with fallback and verified outputs.
   const mediaStore = new MediaStore(config.media.dir, config.media.referenceDir);
-  const visualIdentity = new VisualIdentityService(db, 'jovi', (path) => mediaStore.isReadableInput(path), { bus: events, attestation });
+  const visualIdentity = new VisualIdentityService(db, 'jovi', (path) => mediaStore.isReadableInput(path), { bus: events, attestation }, () => identity.getActive().profile.age);
   if (config.database.autoSeed) visualIdentity.seed();
   const mediaProviders = new MediaProviderRegistry(config.media.providerPreference);
   for (const provider of options.mediaProviders ?? createMediaProvidersFromConfig(config, mediaStore)) mediaProviders.register(provider);
@@ -238,6 +251,7 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
     events,
     credentials,
     budget,
+    retention,
     tasks,
     jobs,
     worker,

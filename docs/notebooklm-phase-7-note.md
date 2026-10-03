@@ -55,3 +55,11 @@ The local Phase 6 test suite previously passed with 139 tests and 2 expected rea
 
 ### Phase 8 handoff
 Next logical phase: **Creative Production** — convert selected ideas into scripts/storyboards/visual prompts and connect controlled generation adapters (ComfyUI/Google Flow/video/voice) while preserving QA and human approval boundaries.
+
+## Errata — 3 October 2026 (security remediation R-19)
+
+These corrections reconcile this note with later work. The text above is kept as the historical record.
+
+- **Last Phase 7 commit:** `bc98dc9` (it recorded the final branch state), not `c527b5c`.
+- **Phase 7 as committed did not build.** It was repaired at the start of Phase 8. The statement that source changes "still require a local npm test" is resolved: the full suite now runs in CI (`.github/workflows/ci.yml`).
+- **Trends (D-20):** there is still no live web or social connector. Every trend the Trends agent returns now carries a code-assigned `provenance: "MODEL_KNOWLEDGE"` and `verified: false`. A `CURRENT` freshness is the model's claim, not verified data.

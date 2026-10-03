@@ -1,6 +1,7 @@
 import { ProviderError } from '../../core/errors.js';
 import { nowIso } from '../../core/ids.js';
 import { LOCAL_COMPUTE_COST } from '../../models/pricing.js';
+import { BYTE_CAPS, readBodyCapped, readErrorSnippet } from '../../models/providers/http.js';
 import type { CostEstimate } from '../../models/types.js';
 import type { MediaStore } from '../media-store.js';
 import { runProcess } from '../process-runner.js';
@@ -178,7 +179,9 @@ export class ElevenLabsVoiceProvider implements VoiceGenerationProvider {
           signal: AbortSignal.timeout(10_000),
         });
         if (response.ok) {
-          const voice = (await response.json().catch(() => ({}))) as { name?: string };
+          const voice = (await readBodyCapped(response, BYTE_CAPS.json, this.id)
+            .then((b) => JSON.parse(b.toString('utf8')) as unknown)
+            .catch(() => ({}))) as { name?: string };
           status = { ...base, available: true, state: 'AVAILABLE', reason: `voice ${voice.name ?? this.options.voiceId}`, details: { voice: voice.name ?? null } };
         } else if (response.status === 401 || response.status === 403) status = { ...base, available: false, state: 'MISCONFIGURED', reason: `API key rejected (HTTP ${response.status})` };
         else if (response.status === 404) status = { ...base, available: false, state: 'MISCONFIGURED', reason: `voice ${this.options.voiceId} not found` };
@@ -207,11 +210,11 @@ export class ElevenLabsVoiceProvider implements VoiceGenerationProvider {
       throw new ProviderError(this.id, timedOut ? `request timed out after ${this.options.timeoutMs}ms` : `network error: ${(error as Error).message}`, { retryable: true, cause: error });
     }
     if (!response.ok) {
-      const body = (await response.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300);
+      const body = await readErrorSnippet(response);
       const retryable = response.status === 429 || response.status >= 500;
       throw new ProviderError(this.id, `HTTP ${response.status}: ${body}`, { retryable, status: response.status });
     }
-    const bytes = Buffer.from(await response.arrayBuffer());
+    const bytes = await readBodyCapped(response, BYTE_CAPS.audio, this.id);
     const output = this.store.write(request.productionId, request.assetId, '.mp3', bytes);
     return {
       provider: this.id,

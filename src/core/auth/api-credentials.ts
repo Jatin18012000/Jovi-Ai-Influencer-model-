@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { userInfo } from 'node:os';
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, gt, isNull, or } from 'drizzle-orm';
 import { z } from 'zod';
 import type { JoviDatabase } from '../../database/client.js';
 import { apiCredentials } from '../../database/schema.js';
@@ -76,6 +76,7 @@ export interface CredentialSummary {
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
+  expiresAt: string | null;
 }
 
 /**
@@ -92,24 +93,59 @@ export class ApiCredentialService {
   constructor(
     private readonly db: JoviDatabase,
     private readonly bus: EventBus,
-    private readonly envToken: { token: string | undefined; scopes: readonly ApiScope[] },
+    /** R-13: `previousToken` stays valid during a rollover of JOVI_API_TOKEN. */
+    private readonly envToken: { token: string | undefined; previousToken?: string | undefined; scopes: readonly ApiScope[] },
     /** R-08: credential events are protected (attested) events. */
     private readonly attestation?: EventAttestation,
   ) {
     this.envHash = envToken.token ? Buffer.from(hashToken(envToken.token), 'hex') : null;
+    this.envPreviousHash = envToken.previousToken ? Buffer.from(hashToken(envToken.previousToken), 'hex') : null;
   }
 
-  create(name: string, scopes: readonly ApiScope[], createdBy: string): { credential: CredentialSummary; token: string } {
+  private readonly envPreviousHash: Buffer | null;
+
+  create(name: string, scopes: readonly ApiScope[], createdBy: string, options: { expiresInDays?: number; rotatedFrom?: string } = {}): { credential: CredentialSummary; token: string } {
     const validName = CredentialNameSchema.parse(name);
     const validScopes = z.array(ApiScope).min(1).parse([...new Set(scopes)]);
     if (this.db.select().from(apiCredentials).where(eq(apiCredentials.name, validName)).get()) {
       throw new ConflictError(`A credential named "${validName}" already exists (names are never reused, even after revocation)`);
     }
+    if (options.expiresInDays !== undefined && (!Number.isFinite(options.expiresInDays) || options.expiresInDays <= 0)) {
+      throw new ValidationError('expiresInDays must be a positive number of days');
+    }
+    const expiresAt = options.expiresInDays !== undefined ? new Date(Date.now() + options.expiresInDays * 86_400_000).toISOString() : null;
     const token = generateToken();
     const id = newId('credential');
-    this.db.insert(apiCredentials).values({ id, name: validName, tokenHash: hashToken(token), scopes: validScopes, createdBy }).run();
-    this.bus.emit({ eventType: 'API_CREDENTIAL_CREATED', source: SOURCE, entityId: id, payload: { name: validName, scopes: validScopes, createdBy }, ...this.attested() });
+    this.db.insert(apiCredentials).values({ id, name: validName, tokenHash: hashToken(token), scopes: validScopes, createdBy, expiresAt }).run();
+    this.bus.emit({
+      eventType: 'API_CREDENTIAL_CREATED',
+      source: SOURCE,
+      entityId: id,
+      payload: { name: validName, scopes: validScopes, createdBy, expiresAt, rotatedFrom: options.rotatedFrom ?? null },
+      ...this.attested(),
+    });
     return { credential: this.summary(id), token };
+  }
+
+  /**
+   * R-13 rotation with a rollover window: issues a new credential with the
+   * same scopes and makes the old one expire after `graceDays`, so both are
+   * valid while clients switch over. Names are never reused, so the new one
+   * is `<name>.r<N>`.
+   */
+  rotate(name: string, rotatedBy: string, graceDays = 7): { credential: CredentialSummary; token: string; previous: CredentialSummary } {
+    const row = this.db.select().from(apiCredentials).where(eq(apiCredentials.name, name)).get();
+    if (!row) throw new NotFoundError('ApiCredential', name);
+    if (row.revokedAt || (row.expiresAt && row.expiresAt <= nowIso())) throw new ConflictError(`Credential "${name}" is no longer valid; create a new one instead`);
+    if (!Number.isFinite(graceDays) || graceDays < 0) throw new ValidationError('graceDays must be a non-negative number');
+    const base = name.replace(/\.r\d+$/, '');
+    let n = 2;
+    while (this.db.select().from(apiCredentials).where(eq(apiCredentials.name, `${base}.r${n}`)).get()) n += 1;
+    const created = this.create(`${base}.r${n}`, z.array(ApiScope).parse(row.scopes), rotatedBy, { rotatedFrom: name });
+    const graceEnd = new Date(Date.now() + graceDays * 86_400_000).toISOString();
+    const expiresAt = row.expiresAt && row.expiresAt < graceEnd ? row.expiresAt : graceEnd;
+    this.db.update(apiCredentials).set({ expiresAt }).where(eq(apiCredentials.id, row.id)).run();
+    return { ...created, previous: this.summary(row.id) };
   }
 
   revoke(name: string, revokedBy: string): CredentialSummary {
@@ -137,20 +173,28 @@ export class ApiCredentialService {
   /** True when at least one way to authenticate exists. */
   hasUsableCredential(): boolean {
     if (this.envHash) return true;
-    return this.db.select().from(apiCredentials).where(isNull(apiCredentials.revokedAt)).get() !== undefined;
+    return this.db.select().from(apiCredentials).where(and(isNull(apiCredentials.revokedAt), this.notExpired())).get() !== undefined;
+  }
+
+  private notExpired() {
+    return or(isNull(apiCredentials.expiresAt), gt(apiCredentials.expiresAt, nowIso()))!;
   }
 
   /** Resolves a presented bearer token to a principal, or null. Never throws on bad input. */
   verify(token: string): Principal | null {
     if (!token || token.length > 512) return null;
     const hash = hashToken(token);
-    if (this.envHash && timingSafeEqual(Buffer.from(hash, 'hex'), this.envHash)) {
+    const presented = Buffer.from(hash, 'hex');
+    if (this.envHash && timingSafeEqual(presented, this.envHash)) {
       return { id: 'env:JOVI_API_TOKEN', kind: 'env', name: 'JOVI_API_TOKEN', scopes: this.envToken.scopes };
+    }
+    if (this.envPreviousHash && timingSafeEqual(presented, this.envPreviousHash)) {
+      return { id: 'env:JOVI_API_TOKEN_PREVIOUS', kind: 'env', name: 'JOVI_API_TOKEN_PREVIOUS', scopes: this.envToken.scopes };
     }
     const row = this.db
       .select()
       .from(apiCredentials)
-      .where(and(eq(apiCredentials.tokenHash, hash), isNull(apiCredentials.revokedAt)))
+      .where(and(eq(apiCredentials.tokenHash, hash), isNull(apiCredentials.revokedAt), this.notExpired()))
       .get();
     if (!row) return null;
     this.db.update(apiCredentials).set({ lastUsedAt: nowIso() }).where(eq(apiCredentials.id, row.id)).run();
@@ -172,13 +216,36 @@ export class ApiCredentialService {
       createdAt: row.createdAt,
       lastUsedAt: row.lastUsedAt,
       revokedAt: row.revokedAt,
+      expiresAt: row.expiresAt,
     };
   }
 }
 
-/** Validates an operator-supplied JOVI_API_TOKEN. */
-export function assertStrongToken(token: string): void {
+/** Minimum estimated strength for an operator-supplied token (R-13: "≥ 32 random bytes" ≈ 256 bits; 128 is the floor). */
+export const MIN_TOKEN_BITS = 128;
+
+/**
+ * Rough upper bound on a token's entropy: length × log2(alphabet), where the
+ * alphabet is the union of the character classes it uses. It cannot prove a
+ * token is random, but it rejects short, single-class and repetitive strings.
+ */
+export function estimateTokenBits(token: string): number {
+  let alphabet = 0;
+  if (/[a-z]/.test(token)) alphabet += 26;
+  if (/[A-Z]/.test(token)) alphabet += 26;
+  if (/[0-9]/.test(token)) alphabet += 10;
+  if (/[^a-zA-Z0-9]/.test(token)) alphabet += 32;
+  const distinct = new Set(token).size;
+  return token.length * Math.log2(Math.max(2, Math.min(alphabet, distinct * 2)));
+}
+
+/** Validates an operator-supplied token (JOVI_API_TOKEN / JOVI_API_TOKEN_PREVIOUS). */
+export function assertStrongToken(token: string, name = 'JOVI_API_TOKEN'): void {
+  const hint = 'generate one with `openssl rand -base64 32` or `npm run jovi -- --api-token create`';
   if (token.length < MIN_TOKEN_LENGTH) {
-    throw new ValidationError(`JOVI_API_TOKEN must be at least ${MIN_TOKEN_LENGTH} characters (use \`npm run jovi -- --api-token create\` to generate one)`);
+    throw new ValidationError(`${name} must be at least ${MIN_TOKEN_LENGTH} characters (${hint})`);
+  }
+  if (new Set(token).size < 10 || estimateTokenBits(token) < MIN_TOKEN_BITS) {
+    throw new ValidationError(`${name} looks guessable (too few distinct characters); use 32 random bytes (${hint})`);
   }
 }

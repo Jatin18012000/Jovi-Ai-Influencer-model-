@@ -136,9 +136,12 @@ export function createToolKit(services: ToolServices, guard: PermissionGuard, ru
       get: (productionId: string) => use('production.read', () => services.production.get(productionId)),
       getArtifact: <T = unknown>(productionId: string, kind: ArtifactKind) => use('production.read', () => services.production.latestArtifact<T>(productionId, kind)),
       listAssets: (productionId: string, kind?: MediaKind): MediaAsset[] => use('production.read', () => services.assets.list(productionId, kind)),
-      /** Stores a creative artifact (script, storyboard, prompts, edit plan, QA report). No status changes, no approval. */
+      /**
+       * Stores a creative artifact. The required tool is scoped by kind
+       * (`production.write:<KIND>`, R-10). No status changes, no approval.
+       */
       saveArtifact: (productionId: string, kind: ArtifactKind, content: unknown) =>
-        use('production.write', () => services.production.saveArtifact(productionId, kind, content, run.trace('artifact').agentRunId ?? null, run.scope)),
+        use(`production.write:${kind}`, () => services.production.saveArtifact(productionId, kind, content, run.trace('artifact').agentRunId ?? null, run.scope)),
     },
 
     /**

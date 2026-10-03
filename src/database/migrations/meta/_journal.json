@@ -36,6 +36,13 @@
       "when": 1791011271986,
       "tag": "0004_audit_chain_and_job_slots",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1791013781441,
+      "tag": "0005_credential_expiry_and_audit_checkpoints",
+      "breakpoints": true
     }
   ]
 }

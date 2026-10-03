@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { PermissionLevel } from '../../types/enums.js';
 import { assertStrongToken, parseScopes, type ApiScope } from '../auth/api-credentials.js';
+import { ValidationError } from '../errors.js';
 
 /**
  * Runtime configuration. Secrets come exclusively from environment variables
@@ -17,6 +18,19 @@ const optionalString = z
   .string()
   .optional()
   .transform((value) => (value && value.trim() ? value.trim() : undefined));
+
+/** R-17: optional SHA-256 pin (64 hex characters). */
+const optionalSha256 = optionalString.refine((v) => v === undefined || /^[0-9a-f]{64}$/i.test(v), 'must be a 64-character hex SHA-256');
+
+/** True for localhost / loopback hosts (used for trust warnings). */
+function isLoopbackUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    return host === 'localhost' || host === '::1' || /^127\./.test(host);
+  } catch {
+    return false;
+  }
+}
 
 const booleanFlag = (defaultValue: boolean) =>
   z
@@ -85,6 +99,8 @@ const EnvSchema = z.object({
    * required; without this, use scoped credentials (`npm run jovi -- --api-token create`).
    */
   JOVI_API_TOKEN: optionalSecret,
+  /** R-13: the previous operator token, accepted alongside JOVI_API_TOKEN during a rollover. */
+  JOVI_API_TOKEN_PREVIOUS: optionalSecret,
   /** Scopes granted to JOVI_API_TOKEN (default: read,operate — no approval, no identity changes). */
   JOVI_API_TOKEN_SCOPES: z.string().default('read,operate'),
   /** Host header values the API answers to (DNS-rebinding defence). Loopback names are always allowed. */
@@ -135,6 +151,17 @@ const EnvSchema = z.object({
   ELEVENLABS_BASE_URL: z.string().url().default('https://api.elevenlabs.io'),
   JOVI_VOICE_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
 
+  /** R-17 trust pins (optional): SHA-256 of executables (absolute paths required) and approved workflows. */
+  JOVI_FFMPEG_SHA256: optionalSha256,
+  JOVI_FFPROBE_SHA256: optionalSha256,
+  MACOS_SAY_SHA256: optionalSha256,
+  COMFYUI_IMAGE_WORKFLOW_SHA256: optionalSha256,
+  COMFYUI_VIDEO_WORKFLOW_SHA256: optionalSha256,
+
+  /** R-18 retention. Events: 0 keeps the audit log forever (default). Agent/model runs hold prompts and outputs. */
+  JOVI_EVENT_RETENTION_DAYS: z.coerce.number().int().min(0).default(0),
+  JOVI_RUN_RETENTION_DAYS: z.coerce.number().int().min(0).default(180),
+
   JOVI_LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 });
 
@@ -179,6 +206,7 @@ export type JoviConfig = {
     host: string;
     port: number;
     token: string | undefined;
+    previousToken: string | undefined;
     tokenScopes: ApiScope[];
     allowedHosts: string[];
     allowedOrigins: string[];
@@ -209,7 +237,11 @@ export type JoviConfig = {
     maxRegenerations: number;
     quotaBytes: number;
     supersededRetentionDays: number;
+    /** R-17: SHA-256 pins for executables and workflows (undefined = not pinned). */
+    pins: { ffmpeg?: string; ffprobe?: string; say?: string; imageWorkflow?: string; videoWorkflow?: string };
   };
+  /** R-18: retention in days (0 = keep forever). */
+  retention: { eventDays: number; runDays: number };
   logLevel: z.infer<typeof EnvSchema>['JOVI_LOG_LEVEL'];
   /** Human-readable configuration warnings (e.g. obsolete variables). */
   warnings: string[];
@@ -233,9 +265,28 @@ function allowedHostsFor(bindHost: string, extra: string): string[] {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
   const parsed = EnvSchema.parse(env);
   if (parsed.JOVI_API_TOKEN) assertStrongToken(parsed.JOVI_API_TOKEN);
+  if (parsed.JOVI_API_TOKEN_PREVIOUS) {
+    if (!parsed.JOVI_API_TOKEN) throw new ValidationError('JOVI_API_TOKEN_PREVIOUS is only valid together with JOVI_API_TOKEN (rollover)');
+    assertStrongToken(parsed.JOVI_API_TOKEN_PREVIOUS, 'JOVI_API_TOKEN_PREVIOUS');
+  }
   const warnings = Object.entries(OBSOLETE_VARIABLES)
     .filter(([name]) => env[name] !== undefined && env[name] !== '')
     .map(([name, hint]) => `${name} is obsolete and ignored: ${hint}`);
+  // R-17: pinned executables must be absolute paths (a PATH lookup could resolve to a different binary).
+  for (const [pin, path, name] of [
+    [parsed.JOVI_FFMPEG_SHA256, parsed.JOVI_FFMPEG_PATH, 'JOVI_FFMPEG_PATH'],
+    [parsed.JOVI_FFPROBE_SHA256, parsed.JOVI_FFPROBE_PATH, 'JOVI_FFPROBE_PATH'],
+    [parsed.MACOS_SAY_SHA256, parsed.MACOS_SAY_PATH, 'MACOS_SAY_PATH'],
+  ] as const) {
+    if (pin && !(path ?? '').startsWith('/')) throw new ValidationError(`${name} must be an absolute path when its SHA-256 pin is set`);
+  }
+  // R-17: LM Studio and ComfyUI are unauthenticated plain-HTTP services; reaching them off-loopback is a trust decision.
+  if (parsed.LM_STUDIO_ENABLED && !isLoopbackUrl(parsed.LM_STUDIO_URL)) {
+    warnings.push(`LM_STUDIO_URL ${parsed.LM_STUDIO_URL} is not loopback: prompts and outputs travel over plain HTTP to a server Jovi cannot authenticate`);
+  }
+  if (parsed.COMFYUI_URL && !isLoopbackUrl(parsed.COMFYUI_URL)) {
+    warnings.push(`COMFYUI_URL ${parsed.COMFYUI_URL} is not loopback: ComfyUI has no authentication; anyone who can reach it can run workflows and read uploads`);
+  }
   return {
     env: parsed.NODE_ENV,
     database: { url: parsed.DATABASE_URL, autoSeed: parsed.JOVI_AUTO_SEED },
@@ -274,6 +325,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
       host: parsed.HOST,
       port: parsed.PORT,
       token: parsed.JOVI_API_TOKEN,
+      previousToken: parsed.JOVI_API_TOKEN_PREVIOUS,
       tokenScopes: parseScopes(parsed.JOVI_API_TOKEN_SCOPES),
       allowedHosts: allowedHostsFor(parsed.HOST, parsed.JOVI_ALLOWED_HOSTS),
       allowedOrigins: list(parsed.JOVI_ALLOWED_ORIGINS).map((o) => o.replace(/\/+$/, '').toLowerCase()),
@@ -304,7 +356,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
       maxRegenerations: parsed.JOVI_MAX_MEDIA_REGENERATIONS,
       quotaBytes: parsed.JOVI_MEDIA_QUOTA_MB * 1024 * 1024,
       supersededRetentionDays: parsed.JOVI_SUPERSEDED_RETENTION_DAYS,
+      pins: {
+        ...(parsed.JOVI_FFMPEG_SHA256 ? { ffmpeg: parsed.JOVI_FFMPEG_SHA256 } : {}),
+        ...(parsed.JOVI_FFPROBE_SHA256 ? { ffprobe: parsed.JOVI_FFPROBE_SHA256 } : {}),
+        ...(parsed.MACOS_SAY_SHA256 ? { say: parsed.MACOS_SAY_SHA256 } : {}),
+        ...(parsed.COMFYUI_IMAGE_WORKFLOW_SHA256 ? { imageWorkflow: parsed.COMFYUI_IMAGE_WORKFLOW_SHA256 } : {}),
+        ...(parsed.COMFYUI_VIDEO_WORKFLOW_SHA256 ? { videoWorkflow: parsed.COMFYUI_VIDEO_WORKFLOW_SHA256 } : {}),
+      },
     },
+    retention: { eventDays: parsed.JOVI_EVENT_RETENTION_DAYS, runDays: parsed.JOVI_RUN_RETENTION_DAYS },
     logLevel: parsed.JOVI_LOG_LEVEL,
     warnings,
   };
@@ -322,7 +382,7 @@ export function redactConfig(config: JoviConfig): Record<string, unknown> {
       gemini: { ...config.providers.gemini, apiKey: mask(config.providers.gemini.apiKey) },
       lmstudio: { ...config.providers.lmstudio, apiKey: mask(config.providers.lmstudio.apiKey) },
     },
-    api: { ...config.api, token: mask(config.api.token) },
+    api: { ...config.api, token: mask(config.api.token), previousToken: mask(config.api.previousToken) },
     media: { ...config.media, elevenlabs: { ...config.media.elevenlabs, apiKey: mask(config.media.elevenlabs.apiKey) } },
   };
 }

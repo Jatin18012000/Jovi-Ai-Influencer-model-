@@ -24,7 +24,7 @@ export const QA_AGENT_DEFINITION: AgentDefinition = {
   description: 'Structured creative QA across identity, personality, brand, content, visual, safety and technical checks; can block approval.',
   capabilities: ['creative-qa', 'identity-qa', 'safety-qa', 'technical-qa'],
   // QA reads everything it judges and writes only its report. It cannot approve, publish or change assets.
-  allowedTools: ['identity.read', 'strategy.read', 'knowledge.read', 'production.read', 'production.write', 'model.generate'],
+  allowedTools: ['identity.read', 'strategy.read', 'knowledge.read', 'production.read', 'production.write:QA_REPORT', 'model.generate'],
   permissionLevel: 'LEVEL_2_MODIFY',
   modelRequirements: { defaultTier: 'NORMAL', privacy: 'STANDARD', latency: 'STANDARD', structuredOutput: true },
   costClass: 'MEDIUM',

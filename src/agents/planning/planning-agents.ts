@@ -22,13 +22,20 @@ const ResearchOutput = z.object({
 });
 export type ResearchResult = z.infer<typeof ResearchOutput>;
 
-const Trend = z.object({
-  name: z.string().min(1).max(200),
-  signal: z.string().min(1).max(500),
-  fitScore: z.number().min(0).max(1),
-  angle: z.string().min(1).max(500),
-  freshness: z.enum(['CURRENT', 'EMERGING', 'EVERGREEN']),
-});
+/**
+ * D-20 (R-19): there is no live web/social connector, so every trend is the
+ * model's own knowledge. Provenance is set by code, never by the model: a
+ * "CURRENT" freshness is the model's claim, explicitly marked unverified.
+ */
+const Trend = z
+  .object({
+    name: z.string().min(1).max(200),
+    signal: z.string().min(1).max(500),
+    fitScore: z.number().min(0).max(1),
+    angle: z.string().min(1).max(500),
+    freshness: z.enum(['CURRENT', 'EMERGING', 'EVERGREEN']),
+  })
+  .transform((t) => ({ ...t, provenance: 'MODEL_KNOWLEDGE' as const, verified: false as const }));
 const TrendOutput = z.object({
   trends: z.array(Trend).min(3).max(8),
   avoid: z.array(z.string().min(1).max(300)).max(6),

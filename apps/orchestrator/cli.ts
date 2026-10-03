@@ -35,8 +35,13 @@ Usage:
                                             HUMAN action: record a new visual identity version (LOCKED when all anchors are set)
   npm run jovi -- --api-token create --name <name> --scopes read,operate[,approve,identity-admin]
                                             Create an API credential (token shown once; only its hash is stored)
+  npm run jovi -- --api-token create ... [--expires-days N]   Optional expiry
+  npm run jovi -- --api-token rotate --name <name> [--grace-days 7]
+                                            New token with the same scopes; the old one stays valid for the grace period
   npm run jovi -- --api-token list | --api-token revoke --name <name>
   npm run jovi -- --audit-verify            Verify the event hash chain; prints the head hash to record elsewhere
+  npm run jovi -- --retention [--dry-run]   Apply data retention (agent/model runs; events only if JOVI_EVENT_RETENTION_DAYS > 0)
+  npm run jovi -- --backup <file.db>        Online SQLite backup (owner-only file; never overwrites)
   npm run jovi -- --media-gc [--dry-run] [--older-than-days 7]
                                             Delete files of SUPERSEDED media older than N days (records are kept)
   npm run jovi -- --simulate ...            SIMULATION: canned mock output + simulated media only
@@ -79,6 +84,10 @@ async function main(): Promise<number> {
       'media-gc': { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       'older-than-days': { type: 'string' },
+      'expires-days': { type: 'string' },
+      retention: { type: 'boolean', default: false },
+      backup: { type: 'string' },
+      'grace-days': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -98,13 +107,23 @@ async function main(): Promise<number> {
   const me = localPrincipal();
 
   try {
-    if (values['api-token']) return apiTokenCommand(core, values['api-token'], values.name, values.scopes, me.id);
+    if (values['api-token']) return apiTokenCommand(core, values['api-token'], values.name, values.scopes, me.id, values['expires-days'], values['grace-days']);
     if (values.providers) return await printProviders(core);
     if (values['audit-verify']) {
       const chain = core.events.verifyChain();
       process.stdout.write(`${JSON.stringify(chain, null, 2)}\n`);
       if (chain.ok) process.stdout.write(`Audit chain OK. Record this head outside this machine: #${chain.head?.sequence ?? 0} ${chain.head?.hash ?? '(empty)'}\n`);
       return chain.ok ? 0 : 2;
+    }
+    if (values.retention) {
+      const result = core.retention.apply({ dryRun: values['dry-run'] });
+      process.stdout.write(`${JSON.stringify({ policy: core.config.retention, ...result }, null, 2)}\n`);
+      return 0;
+    }
+    if (values.backup) {
+      const backup = await core.retention.backup(values.backup);
+      process.stdout.write(`Backup written: ${backup.path} (${(backup.bytes / 1048576).toFixed(1)} MB, mode 0600). It contains goals, outputs and credential hashes: store it encrypted.\n`);
+      return 0;
     }
     if (values['media-gc']) {
       const days = values['older-than-days'] !== undefined ? Number(values['older-than-days']) : core.config.media.supersededRetentionDays;
@@ -234,14 +253,31 @@ async function confirm(action: string, expected: string, yes: boolean): Promise<
   }
 }
 
-function apiTokenCommand(core: JoviCore, action: string, name: string | undefined, scopes: string | undefined, actor: string): number {
+function apiTokenCommand(
+  core: JoviCore,
+  action: string,
+  name: string | undefined,
+  scopes: string | undefined,
+  actor: string,
+  expiresDays?: string,
+  graceDays?: string,
+): number {
   if (action === 'list') {
     process.stdout.write(`${JSON.stringify(core.credentials.list(), null, 2)}\n`);
     return 0;
   }
   if (action === 'create') {
-    const { credential, token } = core.credentials.create(name ?? '', parseScopes(scopes ?? 'read'), actor);
-    process.stdout.write(`Created API credential "${credential.name}" (scopes: ${credential.scopes.join(', ')}).\nToken (shown once — store it now):\n\n  ${token}\n\n`);
+    const { credential, token } = core.credentials.create(name ?? '', parseScopes(scopes ?? 'read'), actor, expiresDays !== undefined ? { expiresInDays: Number(expiresDays) } : {});
+    process.stdout.write(
+      `Created API credential "${credential.name}" (scopes: ${credential.scopes.join(', ')}${credential.expiresAt ? `; expires ${credential.expiresAt}` : ''}).\nToken (shown once — store it now):\n\n  ${token}\n\n`,
+    );
+    return 0;
+  }
+  if (action === 'rotate') {
+    const { credential, token, previous } = core.credentials.rotate(name ?? '', actor, graceDays !== undefined ? Number(graceDays) : 7);
+    process.stdout.write(
+      `Rotated "${previous.name}" → "${credential.name}" (scopes: ${credential.scopes.join(', ')}). "${previous.name}" stays valid until ${previous.expiresAt}.\nNew token (shown once — store it now):\n\n  ${token}\n\n`,
+    );
     return 0;
   }
   if (action === 'revoke') {
@@ -249,7 +285,9 @@ function apiTokenCommand(core: JoviCore, action: string, name: string | undefine
     process.stdout.write(`Revoked API credential "${revoked.name}".\n`);
     return 0;
   }
-  process.stderr.write('Usage: --api-token create --name <name> --scopes <scopes> | --api-token list | --api-token revoke --name <name>\n');
+  process.stderr.write(
+    'Usage: --api-token create --name <name> --scopes <scopes> [--expires-days N] | --api-token rotate --name <name> [--grace-days 7] | --api-token list | --api-token revoke --name <name>\n',
+  );
   return 1;
 }
 

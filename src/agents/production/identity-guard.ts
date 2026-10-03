@@ -100,6 +100,30 @@ export function findIdentityViolations(texts: readonly string[], identity: JoviI
   return violations;
 }
 
+/**
+ * R-11: checks for human-entered visual identity anchors (face, hair, body,
+ * style, aesthetic…). Real-person likeness, minor descriptors, ages under 21
+ * and explicit content are refused. Negated phrasing ("not resembling any
+ * real person", "never explicit") is allowed. Heuristic, like the rest.
+ */
+export function findAppearanceViolations(texts: readonly string[]): IdentityViolation[] {
+  const joined = texts.filter(Boolean).join('\n');
+  const violations: IdentityViolation[] = [];
+  const likeness = findViolation(joined, LIKENESS);
+  if (likeness) violations.push({ rule: 'REAL_PERSON_LIKENESS', match: likeness });
+  const minor = findViolation(joined, MINOR_DESCRIPTOR);
+  if (minor) violations.push({ rule: 'MINOR_DEPICTION', match: minor });
+  for (const pattern of [AGE_CLAIM, PERSON_AGE]) {
+    for (const m of joined.matchAll(pattern)) {
+      const age = parseNumber(m[1] ?? '');
+      if (age !== null && age >= 5 && age < 21) violations.push({ rule: 'MINOR_DEPICTION', match: m[0] });
+    }
+  }
+  const explicit = findViolation(joined, EXPLICIT);
+  if (explicit) violations.push({ rule: 'EXPLICIT', match: explicit });
+  return violations;
+}
+
 /** Throws (→ router repair/fallback) when creative text contradicts Jovi's immutable identity. */
 export function assertIdentityPreserved(texts: readonly string[], identity: JoviIdentity, options: { likeness?: boolean } = {}): void {
   const violations = findIdentityViolations(texts, identity, options);

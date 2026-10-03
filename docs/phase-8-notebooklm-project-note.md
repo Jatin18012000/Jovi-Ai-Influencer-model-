@@ -166,3 +166,14 @@ Despite these, the test completed with 2/2 tests passing.
 
 ### Scope of this validation
 The validation covers only the Phase 8 **text** agents (script, storyboard, visual prompts, QA review) on the local model. **No real image, video, voice or editing/render provider has been validated.** ComfyUI is still tested only against a fake HTTP server, Google Flow remains NOT_INTEGRATED, and no voice or render engine exists. Media assets in this run were not produced by any real media provider.
+
+## Errata — 3 October 2026 (security remediation R-19)
+
+These corrections reconcile this note with later work. The text above is kept as the historical record.
+
+- **Phase status (top of note):** the statement that the Phase 8 text agents had not been run against a real LM Studio model is superseded. See "Real LM Studio Validation — 29 September 2026" above, which records a PASS (2/2).
+- **Next phase boundary:** Phase 9 became *real media generation*, not publishing. Publishing is planned as Phase 10. Before Phase 10, the security remediations P0–P2 (`docs/audit/14…16`) and the owner steps in `docs/security/sdlc-runbook.md` apply.
+- **Since this note:**
+  - Productions pass a pre-generation safety gate (`SAFETY_REVIEW`) before any media request.
+  - API approvals require an `approve`-scoped credential.
+  - The approver is the authenticated principal.

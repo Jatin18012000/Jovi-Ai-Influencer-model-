@@ -90,6 +90,7 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
 
   const { allowedHosts, allowedOrigins } = core.config.api;
   const PUBLIC_ROUTES = new Set(['/health']);
+  let warnedPreviousToken = false;
   // R-08: auth failures become (throttled) audit events, not only log lines.
   const authFailures = new AuthFailureRecorder((payload) => core.events.emit({ eventType: 'API_AUTH_FAILED', source: 'api.auth', payload }));
   const refuse = (request: FastifyRequest, reason: string, extra: Record<string, unknown> = {}) =>
@@ -128,6 +129,10 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
       return reply.code(403).send({ error: 'FORBIDDEN_SCOPE', message: `This credential lacks the "${required}" scope` });
     }
     request.principal = principal;
+    if (principal.id === 'env:JOVI_API_TOKEN_PREVIOUS' && !warnedPreviousToken) {
+      warnedPreviousToken = true;
+      request.log.warn({ security: 'ROLLOVER_TOKEN_USED' }, 'JOVI_API_TOKEN_PREVIOUS is still in use; finish the rollover and remove it');
+    }
   });
 
   // Baseline security headers for a JSON API.
@@ -156,10 +161,14 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
     if (error instanceof RateLimitedError) {
       return reply.code(429).header('retry-after', String(error.retryAfterSeconds)).send({ error: error.code, message: error.message });
     }
-    if (error instanceof JoviError) return reply.code(500).send({ error: error.code, message: error.message });
-    const statusCode = 'statusCode' in error && typeof error.statusCode === 'number' ? error.statusCode : 500;
-    if (statusCode >= 500) request.log.error({ err: error }, 'unhandled error');
-    return reply.code(statusCode).send({ error: statusCode >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR', message: error.message });
+    // R-12: 5xx bodies are generic (no internal messages, paths or URLs); details go to the server log,
+    // correlated by request id.
+    const statusCode = error instanceof JoviError ? 500 : 'statusCode' in error && typeof error.statusCode === 'number' ? error.statusCode : 500;
+    if (statusCode >= 500) {
+      request.log.error({ err: error, requestId: request.id }, 'request failed');
+      return reply.code(statusCode).send({ error: error instanceof JoviError ? error.code : 'INTERNAL_ERROR', message: 'Internal error; see the server log', requestId: request.id });
+    }
+    return reply.code(statusCode).send({ error: 'REQUEST_ERROR', message: error.message });
   });
 
   /** Unauthenticated liveness only — no provider or configuration details (F-12). */

@@ -127,6 +127,8 @@ export class EventBus {
     private readonly logger: Logger,
   ) {
     const last = sqlite.prepare('SELECT sequence, hash FROM events ORDER BY sequence DESC LIMIT 1');
+    // After retention pruned every event, the chain continues from the latest checkpoint (R-18).
+    const checkpoint = sqlite.prepare('SELECT sequence, hash FROM audit_checkpoints ORDER BY sequence DESC LIMIT 1');
     const insert = sqlite.prepare(`
       INSERT INTO events (id, event_type, timestamp, source, entity_id, payload, schema_version, correlation_id, causation_id, sequence, prev_hash, hash)
       VALUES (@id, @event_type, @timestamp, @source, @entity_id, @payload, @schema_version, @correlation_id, @causation_id, @sequence, @prev_hash, @hash)
@@ -134,7 +136,7 @@ export class EventBus {
     // Sequence and chain link are computed inside one write transaction, so
     // concurrent writers (API + worker processes) serialise and never fork the chain.
     this.append = sqlite.transaction((row) => {
-      const previous = last.get() as { sequence: number; hash: string | null } | undefined;
+      const previous = (last.get() ?? checkpoint.get()) as { sequence: number; hash: string | null } | undefined;
       const sequence = (previous?.sequence ?? 0) + 1;
       const prevHash = previous?.hash ?? GENESIS_HASH;
       insert.run({ ...row, sequence, prev_hash: prevHash, hash: eventHash(prevHash, { ...row, sequence }) });
@@ -238,13 +240,23 @@ export class EventBus {
     }));
   }
 
-  /** Verifies the whole hash chain (R-08). Detects edited, deleted, reordered or inserted rows. */
+  /** Latest retention checkpoint (R-18): the last pruned event's sequence and hash. */
+  latestCheckpoint(): { sequence: number; hash: string } | null {
+    return (this.sqlite.prepare('SELECT sequence, hash FROM audit_checkpoints ORDER BY sequence DESC LIMIT 1').get() as { sequence: number; hash: string } | undefined) ?? null;
+  }
+
+  /**
+   * Verifies the whole hash chain (R-08). Detects edited, deleted, reordered or
+   * inserted rows. After retention pruning (R-18) verification starts from the
+   * latest checkpoint instead of the genesis hash.
+   */
   verifyChain(): ChainVerification {
     let checked = 0;
     let legacyUnchained = 0;
-    let expectedPrev: string | null = null;
+    const checkpoint = this.latestCheckpoint();
+    let expectedPrev: string | null = checkpoint && checkpoint.hash !== GENESIS_HASH ? checkpoint.hash : null;
     let head: ChainVerification['head'] = null;
-    let lastSequence = 0;
+    let lastSequence = checkpoint?.sequence ?? 0;
     const fail = (row: ChainRow, reason: string): ChainVerification => ({ ok: false, checked, legacyUnchained, head, firstBreak: { sequence: row.sequence, eventId: row.id, reason } });
     for (const row of this.sqlite.prepare('SELECT * FROM events ORDER BY sequence ASC').iterate() as IterableIterator<ChainRow>) {
       if (row.sequence !== lastSequence + 1) return fail(row, `sequence gap: expected ${lastSequence + 1}`);
@@ -270,7 +282,8 @@ export class EventBus {
     if (!row) return { ok: false, reason: 'event not found' };
     if (row.hash === null || row.prev_hash === null) return { ok: false, reason: 'event is not hash-chained' };
     const previous = this.sqlite.prepare('SELECT hash FROM events WHERE sequence = ?').get(row.sequence - 1) as { hash: string | null } | undefined;
-    const expectedPrev = previous ? previous.hash : GENESIS_HASH;
+    const checkpoint = this.latestCheckpoint();
+    const expectedPrev = previous ? previous.hash : checkpoint && checkpoint.sequence === row.sequence - 1 ? checkpoint.hash : GENESIS_HASH;
     if (row.prev_hash !== (expectedPrev ?? GENESIS_HASH)) return { ok: false, reason: 'link to the previous event does not match' };
     if (eventHash(row.prev_hash, row) !== row.hash) return { ok: false, reason: 'content does not match its hash' };
     return { ok: true, reason: null };

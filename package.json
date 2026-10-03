@@ -2,7 +2,7 @@
   "name": "jovi-creator-os",
   "version": "0.1.0",
   "private": true,
-  "description": "Jovi Creator OS — autonomous AI creator system: core brain (Phase 6), planning (Phase 7), creative production (Phase 8).",
+  "description": "Jovi Creator OS — human-gated AI creator system: core brain (Phase 6), planning (Phase 7), creative production (Phase 8), real media generation (Phase 9), security hardening (P0–P2).",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -27,7 +27,7 @@
     "jovi:simulate": "tsx apps/orchestrator/cli.ts --simulate",
     "jovi:plan": "tsx apps/orchestrator/cli.ts --plan",
     "jovi:produce": "tsx apps/orchestrator/cli.ts --produce",
-    "test:production": "vitest run tests/unit/production-contracts.test.ts tests/unit/media-providers.test.ts tests/integration/production-pipeline.e2e.test.ts",
+    "test:production": "vitest run tests/unit/production-contracts.test.ts tests/unit/media-providers.test.ts tests/unit/media-generation.test.ts tests/integration/media-providers-fake.test.ts tests/integration/media-regeneration.e2e.test.ts tests/integration/production-pipeline.e2e.test.ts tests/integration/safety-gate.e2e.test.ts",
     "test:production:real": "JOVI_LMSTUDIO_REAL=1 vitest run tests/integration/production.real.test.ts"
   },
   "dependencies": {

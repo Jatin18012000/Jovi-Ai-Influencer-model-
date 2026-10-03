@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { ValidationError } from '../core/errors.js';
 import { resolveFromRoot } from '../core/config/paths.js';
@@ -31,14 +31,14 @@ export class MediaStore {
   /** Output path for an external process (ffmpeg, say) to write to; creates the directory. */
   prepare(productionId: string, assetId: string, extension: string): string {
     const path = this.pathFor(productionId, assetId, extension);
-    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     return path;
   }
 
   write(productionId: string, assetId: string, extension: string, bytes: Buffer): string {
     const path = this.pathFor(productionId, assetId, extension);
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, bytes);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, bytes, { mode: 0o600 });
     return path;
   }
 
@@ -50,6 +50,26 @@ export class MediaStore {
   /** True when `path` is a non-empty file inside the media root or the reference directory. */
   isReadableInput(path: string): boolean {
     return MediaStore.isFileWithin(this.root, path) || MediaStore.isFileWithin(this.referenceRoot, resolveFromRoot(path));
+  }
+
+  /**
+   * R-09: reads a confined input file (media or reference directory) without
+   * following symlinks. The path is checked, then opened with O_NOFOLLOW
+   * where the platform supports it, and the opened descriptor is re-checked
+   * (regular, non-empty file), so a swap after the check cannot redirect it.
+   */
+  readInput(path: string): Buffer {
+    const candidates = [resolve(path), resolveFromRoot(path)];
+    const target = candidates.find((p) => MediaStore.isFileWithin(this.root, p) || MediaStore.isFileWithin(this.referenceRoot, p));
+    if (!target) throw new ValidationError(`refusing to read ${path}: not a regular file inside the media or reference directory`);
+    const fd = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    try {
+      const info = fstatSync(fd);
+      if (!info.isFile() || info.size === 0) throw new ValidationError(`refusing to read ${path}: not a regular non-empty file`);
+      return readFileSync(fd);
+    } finally {
+      closeSync(fd);
+    }
   }
 
   /** R-05: bytes used under the media root (regular files only; symlinks are not followed). */
@@ -98,10 +118,22 @@ export class MediaStore {
     return this.write(productionId, assetId, extension, Buffer.from(content, 'utf8'));
   }
 
+  /**
+   * R-09: confinement is checked on the real filesystem, not lexically. The
+   * file itself must not be a symlink, and its real path (all parent
+   * directories resolved) must stay inside the real root, so a symlinked
+   * file or directory inside data/ cannot point outside it.
+   */
   private static isFileWithin(root: string, location: string): boolean {
     const path = resolve(location);
     if (!path.startsWith(root + sep)) return false;
-    return existsSync(path) && statSync(path).isFile() && statSync(path).size > 0;
+    try {
+      const entry = lstatSync(path);
+      if (entry.isSymbolicLink() || !entry.isFile() || entry.size === 0) return false;
+      return realpathSync(path).startsWith(realpathSync(root) + sep);
+    } catch {
+      return false;
+    }
   }
 
   static extensionOf(filename: string, fallback: string): string {

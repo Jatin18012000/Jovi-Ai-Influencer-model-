@@ -5,7 +5,9 @@ import { resolveFromRoot } from '../../core/config/paths.js';
 import { nowIso } from '../../core/ids.js';
 import { ComfyUIClient, fillWorkflow, outputFiles } from '../../integrations/comfyui/comfyui-client.js';
 import { LOCAL_COMPUTE_COST } from '../../models/pricing.js';
+import { BYTE_CAPS } from '../../models/providers/http.js';
 import type { MediaKind } from '../../types/enums.js';
+import { pinMismatch } from '../integrity.js';
 import { MediaStore } from '../media-store.js';
 import {
   ASPECT_RATIO_SIZES,
@@ -24,6 +26,8 @@ export interface ComfyUIOptions {
   url: string | undefined;
   /** Path to an API-format workflow JSON containing {{POSITIVE_PROMPT}} etc. */
   workflowPath: string | undefined;
+  /** R-17: optional SHA-256 of the approved workflow; a changed file is refused. */
+  workflowSha256?: string | undefined;
   timeoutMs: number;
   pollMs?: number;
   /** Longest clip the video workflow is expected to produce (seconds). */
@@ -95,7 +99,7 @@ abstract class ComfyUIWorkflowProvider {
     if (!this.store.isReadableInput(path)) {
       throw new ProviderError(this.id, `refusing to upload ${path}: not inside the media or reference directory`, { retryable: false });
     }
-    return this.client!.uploadImage(path);
+    return this.client!.uploadImage(path, this.store.readInput(path));
   }
 
   supportedModels(): string[] {
@@ -130,6 +134,10 @@ abstract class ComfyUIWorkflowProvider {
     if (!configured) return { error: `${this.workflowVariable()} not set (path to an API-format ComfyUI workflow JSON)` };
     const path = resolveFromRoot(configured);
     if (!existsSync(path)) return { error: `workflow file not found: ${configured}` };
+    if (this.options.workflowSha256) {
+      const mismatch = pinMismatch(path, this.options.workflowSha256);
+      if (mismatch) return { error: `workflow is not the approved version (${this.workflowVariable()}_SHA256): ${mismatch}` };
+    }
     try {
       const text = readFileSync(path, 'utf8');
       if (!text.includes('{{POSITIVE_PROMPT}}')) return { error: `workflow ${configured} has no {{POSITIVE_PROMPT}} placeholder` };
@@ -155,7 +163,7 @@ abstract class ComfyUIWorkflowProvider {
     const entry = await this.client.waitForCompletion(promptId, this.options.timeoutMs, this.options.pollMs);
     const [file] = outputFiles(entry);
     if (!file) throw new ProviderError(this.id, `workflow finished without an output file (prompt ${promptId})`, { retryable: false });
-    const bytes = await this.client.download(file);
+    const bytes = await this.client.download(file, this.mediaKind === 'VIDEO' ? BYTE_CAPS.video : BYTE_CAPS.image);
     const ext = MediaStore.extensionOf(file.filename, fallbackExt);
     const location = this.store.write(productionId, assetId, ext, bytes);
     return {

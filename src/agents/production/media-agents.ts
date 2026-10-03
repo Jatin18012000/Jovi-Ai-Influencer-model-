@@ -27,7 +27,7 @@ export const EDITING_AGENT_DEFINITION: AgentDefinition = {
   version: '0.1.0',
   description: 'Builds a structured edit decision list from storyboard, script and real asset states; requests a render when an editing engine exists.',
   capabilities: ['edit-planning', 'captioning', 'render-request'],
-  allowedTools: ['production.read', 'production.write', 'media.edit.render'],
+  allowedTools: ['production.read', 'production.write:EDIT_PLAN', 'media.edit.render'],
   permissionLevel: 'LEVEL_3_EXECUTE',
   modelRequirements: { defaultTier: 'LOW', privacy: 'STANDARD', latency: 'BATCH', structuredOutput: false },
   costClass: 'LOW',

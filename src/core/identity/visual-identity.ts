@@ -2,6 +2,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import type { JoviDatabase } from '../../database/client.js';
 import { visualIdentityVersions } from '../../database/schema.js';
+import { findAppearanceViolations } from '../../agents/production/identity-guard.js';
 import { NotFoundError, ValidationError } from '../errors.js';
 import type { EventAttestation, EventBus } from '../events/event-bus.js';
 import { newId, nowIso } from '../ids.js';
@@ -77,6 +78,8 @@ export class VisualIdentityService {
     private readonly referenceCheck: (path: string) => boolean = () => true,
     /** R-08: the version event is a protected (attested) audit event emitted here, not by callers. */
     private readonly audit?: { bus: EventBus; attestation: EventAttestation },
+    /** R-19 (D-19): the core identity's age, so the visual identity cannot drift from it. */
+    private readonly identityAge?: () => number,
   ) {}
 
   listVersions(): Array<{ version: number; status: 'NOT_LOCKED' | 'LOCKED'; isActive: boolean; approvedBy: string; changeSummary: string; createdAt: string }> {
@@ -112,7 +115,8 @@ export class VisualIdentityService {
         version: 1,
         status: 'NOT_LOCKED',
         isActive: true,
-        profile: INITIAL_VISUAL_IDENTITY,
+        // D-19: apparent age comes from the core identity when it is available.
+        profile: { ...INITIAL_VISUAL_IDENTITY, apparentAge: this.identityAge?.() ?? INITIAL_VISUAL_IDENTITY.apparentAge },
         approvedBy: 'phase-5-specification',
         changeSummary: 'Initial constraints; appearance anchors not yet locked (visual bible: to be locked in the visual phase).',
         createdAt: nowIso(),
@@ -125,6 +129,15 @@ export class VisualIdentityService {
   createVersion(profile: VisualIdentity, approvedBy: string, changeSummary: string): ActiveVisualIdentity {
     if (!approvedBy.trim()) throw new ValidationError('approvedBy is required for visual identity changes');
     const valid = VisualIdentitySchema.parse(profile);
+    // R-11: human-entered anchors get the same likeness / minor / explicit checks as generated text.
+    const violations = findAppearanceViolations([valid.aesthetic, valid.platformSafety, ...LOCKABLE_FIELDS.map((f) => valid[f] ?? '')]);
+    if (violations.length) {
+      throw new ValidationError(`visual identity rejected: ${violations.map((v) => `${v.rule} ("${v.match}")`).join('; ')}. Jovi is an original adult virtual character who must not resemble a real person.`);
+    }
+    const age = this.identityAge?.();
+    if (age !== undefined && valid.apparentAge !== age) {
+      throw new ValidationError(`apparentAge ${valid.apparentAge} contradicts the active identity (age ${age}); the core identity is immutable`);
+    }
     const badReferences = valid.referenceImages.filter((path) => !this.referenceCheck(path));
     if (badReferences.length) {
       throw new ValidationError(`reference images must be existing files inside the reference or media directory: ${badReferences.join(', ')}`);

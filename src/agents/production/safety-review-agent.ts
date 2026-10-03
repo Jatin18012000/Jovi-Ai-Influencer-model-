@@ -22,7 +22,7 @@ export const SAFETY_REVIEW_AGENT_DEFINITION: AgentDefinition = {
   version: '0.1.0',
   description: 'Pre-generation safety gate: heuristic identity/safety checks plus an independent model-graded rubric. Fails closed.',
   capabilities: ['safety-review', 'minor-protection', 'ai-transparency'],
-  allowedTools: ['identity.read', 'production.read', 'production.write', 'model.generate'],
+  allowedTools: ['identity.read', 'production.read', 'production.write:SAFETY_REVIEW', 'model.generate'],
   permissionLevel: 'LEVEL_2_MODIFY',
   modelRequirements: { defaultTier: 'NORMAL', privacy: 'STANDARD', latency: 'STANDARD', structuredOutput: true },
   costClass: 'LOW',

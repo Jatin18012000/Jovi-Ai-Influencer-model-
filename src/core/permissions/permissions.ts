@@ -45,7 +45,14 @@ export const TOOL_REGISTRY = {
   'decision.write': { level: 'LEVEL_2_MODIFY', description: 'Persist decisions.' },
   'memory.write': { level: 'LEVEL_2_MODIFY', description: 'Persist operational memory.' },
   'production.read': { level: 'LEVEL_0_READ', description: 'Read creative production artifacts and asset records.' },
-  'production.write': { level: 'LEVEL_2_MODIFY', description: 'Persist production artifacts (script, storyboard, prompts, edit plan, QA report).' },
+  // R-10: artifact writes are scoped per kind, so an agent can only persist the artifact it owns
+  // (e.g. only the QA agent can write a QA_REPORT, which sets qaStatus).
+  'production.write:SCRIPT': { level: 'LEVEL_2_MODIFY', description: 'Persist the production script.' },
+  'production.write:STORYBOARD': { level: 'LEVEL_2_MODIFY', description: 'Persist the production storyboard.' },
+  'production.write:VISUAL_PROMPTS': { level: 'LEVEL_2_MODIFY', description: 'Persist identity-locked visual prompts.' },
+  'production.write:SAFETY_REVIEW': { level: 'LEVEL_2_MODIFY', description: 'Persist the pre-generation safety review.' },
+  'production.write:EDIT_PLAN': { level: 'LEVEL_2_MODIFY', description: 'Persist the edit decision list.' },
+  'production.write:QA_REPORT': { level: 'LEVEL_2_MODIFY', description: 'Persist the QA report (sets the QA status).' },
   'task.create': { level: 'LEVEL_3_EXECUTE', description: 'Create internal follow-up tasks.' },
   'media.image.generate': { level: 'LEVEL_3_EXECUTE', description: 'Request image generation from a registered image provider.' },
   'media.video.generate': { level: 'LEVEL_3_EXECUTE', description: 'Request video generation from a registered video provider.' },
@@ -104,6 +111,17 @@ export class PermissionGuard {
   static classifyAction(action: string): PermissionLevel {
     const text = action.toLowerCase();
     if (/\b(deploy|infrastructure|server|credential|api key|shell|terminal|delete (the )?database)\b/.test(text)) {
+      return 'LEVEL_5_INFRASTRUCTURE';
+    }
+    // R-16: destructive and filesystem operations. Content words that collide with
+    // creator language ("drop a reel", "reel format", "killing it") only count in their technical form.
+    if (
+      /(^|[\s;&|`(])(sudo|rm|rmdir|mkfs|dd|shred|chmod|chown|killall|pkill)(\s|$)/.test(text) ||
+      /\b(delete|deleting|deleted|wipe|wiping|wiped|erase|erasing|truncate|purge|destroy|overwrite)\b/.test(text) ||
+      /\b(re-?format|format(ting)? (the |a |my )?(disk|drive|hard drive|volume|partition))\b/.test(text) ||
+      /\bdrop (the )?(table|database|schema|collection|index)\b/.test(text) ||
+      /\b(file ?system|kill -9|shut ?down|reboot)\b/.test(text)
+    ) {
       return 'LEVEL_5_INFRASTRUCTURE';
     }
     const external =

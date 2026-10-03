@@ -21,22 +21,23 @@ import {
   type VisualPrompts,
 } from './production-schemas.js';
 
-const TEXT_TOOLS = ['identity.read', 'strategy.read', 'knowledge.read', 'production.read', 'production.write', 'model.generate'] as const;
-const textAgent = (name: string, description: string, capabilities: string[], tier: RoutingTier): AgentDefinition => ({
+const TEXT_TOOLS = ['identity.read', 'strategy.read', 'knowledge.read', 'production.read', 'model.generate'] as const;
+const textAgent = (name: string, description: string, capabilities: string[], tier: RoutingTier, writes: 'SCRIPT' | 'STORYBOARD' | 'VISUAL_PROMPTS'): AgentDefinition => ({
   name,
   version: '0.1.0',
   description,
   capabilities,
-  allowedTools: [...TEXT_TOOLS],
+  // Each text agent may write only its own artifact kind (R-10).
+  allowedTools: [...TEXT_TOOLS, `production.write:${writes}`],
   permissionLevel: 'LEVEL_2_MODIFY',
   modelRequirements: { defaultTier: tier, privacy: 'STANDARD', latency: 'STANDARD', structuredOutput: true },
   costClass: 'MEDIUM',
   riskLevel: 'MEDIUM',
 });
 
-export const SCRIPT_AGENT_DEFINITION = textAgent('script', 'Writes a structured, voice-true production script from a Phase 7 idea.', ['scriptwriting', 'dialogue', 'on-screen-text'], 'HIGH');
-export const STORYBOARD_AGENT_DEFINITION = textAgent('storyboard', 'Turns a script into a continuity-safe, scene-by-scene storyboard.', ['storyboarding', 'shot-design', 'continuity'], 'NORMAL');
-export const VISUAL_PROMPT_AGENT_DEFINITION = textAgent('visual-prompt', 'Converts storyboard scenes into identity-locked image and video generation prompts.', ['prompt-engineering', 'visual-consistency'], 'NORMAL');
+export const SCRIPT_AGENT_DEFINITION = textAgent('script', 'Writes a structured, voice-true production script from a Phase 7 idea.', ['scriptwriting', 'dialogue', 'on-screen-text'], 'HIGH', 'SCRIPT');
+export const STORYBOARD_AGENT_DEFINITION = textAgent('storyboard', 'Turns a script into a continuity-safe, scene-by-scene storyboard.', ['storyboarding', 'shot-design', 'continuity'], 'NORMAL', 'STORYBOARD');
+export const VISUAL_PROMPT_AGENT_DEFINITION = textAgent('visual-prompt', 'Converts storyboard scenes into identity-locked image and video generation prompts.', ['prompt-engineering', 'visual-consistency'], 'NORMAL', 'VISUAL_PROMPTS');
 
 /** Safety negatives appended to every visual prompt (never model-controlled). */
 export const STANDARD_NEGATIVES =

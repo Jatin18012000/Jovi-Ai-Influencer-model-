@@ -128,7 +128,11 @@ npm run jovi -- --visual-identity                           # active visual iden
 npm run jovi -- --set-visual-identity profile.json --summary "<why>" [--yes]   # HUMAN: lock appearance (retype "identity")
 npm run jovi -- --api-token create --name <name> --scopes read,operate[,approve,identity-admin]   # token shown once
 npm run jovi -- --api-token list | --api-token revoke --name <name>
+npm run jovi -- --api-token create --name ci --scopes read --expires-days 30   # optional expiry
+npm run jovi -- --api-token rotate --name n8n [--grace-days 7]                 # new token; old one valid for the grace period
 npm run jovi -- --audit-verify                              # verify the event hash chain; prints the head hash
+npm run jovi -- --retention [--dry-run]                     # apply data retention (runs; events only if enabled)
+npm run jovi -- --backup ~/Backups/jovi.db                  # online SQLite backup (0600, never overwrites)
 npm run jovi -- --media-gc [--dry-run] [--older-than-days 7] # delete files of SUPERSEDED media (records kept)
 ```
 
@@ -195,9 +199,23 @@ Every route except `/health` requires `Authorization: Bearer <token>` with the r
   - The publishing gate reports "approval not attested" unless an `APPROVED` status matches a chain-valid `PRODUCTION_APPROVED` event with the same reviewer.
   - 401/403 refusals are stored as `API_AUTH_FAILED` events, throttled per client.
   - Every external process execution is logged: binary, arguments with paths redacted, duration and exit code.
+- **Hardening** (P2, R-09 … R-18):
+  - **R-09:** media and reference confinement is checked on real paths, refuses symlinks, and reads with `O_NOFOLLOW`.
+  - **R-11:** human-entered visual-identity anchors are checked for real-person likeness, minors and explicit content, and `apparentAge` must match the identity.
+  - **R-12:** 5xx responses are generic and carry a `requestId`.
+  - **R-13:** operator tokens must pass an entropy check. `JOVI_API_TOKEN_PREVIOUS` allows a rollover, and stored credentials support expiry and `rotate`.
+  - **R-15:** provider responses are streamed with byte caps (JSON 10 MB, image 20 MB, audio 50 MB, video 200 MB).
+  - **R-16:** destructive and filesystem phrasings in proposed actions classify as LEVEL_5.
+  - **R-17:** optional SHA-256 pins for executables and ComfyUI workflows; a warning when LM Studio or ComfyUI is not on loopback. See `docs/security/trust-model.md`.
+  - **R-18:** owner-only database permissions, retention, and backups. See `docs/security/data-at-rest.md`.
 - **Supply chain** (R-07): `.github/workflows/ci.yml` runs typecheck, tests, build, `npm audit`, osv-scanner, a gitleaks scan of the full history and an SBOM artifact. It uses a read-only token, SHA-pinned actions and checksum-verified scanners. Dependabot covers npm, actions and the Docker base image, which is pinned by digest. Branch protection is an owner step: see `docs/security/sdlc-runbook.md`.
 - **Pre-generation safety gate** (R-02): after the visual prompts and before **any** media request, the `safety-review` agent runs the identity/safety heuristics and an independent model review against a fixed rubric (adult only, AI transparency, identity consistency, no real-person likeness, platform safety). Anything but a full ALLOW — including a model error or invalid output — is `BLOCK` (fail-closed) and the production stops `BLOCKED`. `MediaService` independently refuses to call a provider without a current ALLOW review (`SAFETY_REVIEW_REQUIRED` / `_BLOCKED` / `_STALE`). Pattern checks are labelled `HEURISTIC` in QA: they are not proof of compliance.
-- **Enforced permissions:** agents receive no services — only a per-run **ToolKit** whose every method checks the agent's allow-list and level (capped at `JOVI_MAX_PERMISSION_LEVEL`). Every call, allowed or denied, is stored in `agent_runs.tool_calls`. There are no shell, filesystem, credential, publishing or infrastructure tools. Executive = `LEVEL_2_MODIFY`.
+- **Enforced permissions:** agents receive no services — only a per-run **ToolKit** whose every method checks the agent's allow-list and level (capped at `JOVI_MAX_PERMISSION_LEVEL`). Every call, allowed or denied, is stored in `agent_runs.tool_calls`. There are no shell, filesystem, credential, publishing or infrastructure tools. Executive = `LEVEL_2_MODIFY`. Artifact writes are scoped per kind (`production.write:SCRIPT`, …, `production.write:QA_REPORT`), so only the QA agent can record a QA verdict (R-10).
+- **External processes (not agent tools):**
+  - The media layer runs operator-configured executables: ffmpeg (render), ffprobe (inspection) and macOS `say` (voice).
+  - They are run with `shell: false`, arguments built by code from validated paths, free text sent via stdin or an SRT file, timeouts, and a log entry per execution.
+  - The binary path comes from `.env`, so `.env` write access means code execution as the Jovi user.
+  - Optional SHA-256 pins (`JOVI_FFMPEG_SHA256`, `JOVI_FFPROBE_SHA256`, `MACOS_SAY_SHA256`) refuse a replaced binary. See `docs/security/trust-model.md`.
 - **Next actions:** required level = max(text classification, owning agent's level). External (`LEVEL_4+`) or unknown-owner actions are `REQUIRES_APPROVAL`.
 - **Memory poisoning:** `POST /api/memory` accepts only FACT/PREFERENCE/LEARNING/AUDIENCE/CONTENT/EXPERIMENT/TEMPORARY, forces `source=api`, caps importance/confidence, limits size, and cannot overwrite seed/agent memory (409). Retrieved memory carries provenance (R-03): `trusted` (seed only), `derived` (agent-written from goals and model output) or `untrusted` (API). Memory, knowledge, recent decisions and similar past concepts are rendered only inside escaped `<memory_data>` / `<knowledge_data>` / `<history_data>` blocks with those labels, and the model is told they are data, not instructions. Decision memory stores a SHA-256 of the objective, never the raw goal text.
 - **Identity:** prompt files contain no identity facts; they are rendered from the *active* identity version.
@@ -207,7 +225,7 @@ Every route except `/health` requires `Authorization: Bearer <token>` with the r
 ## What's inside
 
 - **Executive Agent** (`src/agents/executive`) — interprets the goal, generates 2–5 options, has them evaluated, selects one, delegates next actions, persists decision + memory.
-- **Agent contract + runner + ToolKit** (`src/agents`) — validate input → load context → execute → validate output → persist → emit → return. Ten further agents are registered as *planned*.
+- **Agent contract + runner + ToolKit** (`src/agents`) — validate input → load context → execute → validate output → persist → emit → return. Three further agents (publishing, analytics, learning) are registered as *planned*; they have no implementation and no tools.
 - **Context Engine** — bounded assembly of identity, strategy, relevant memory (trust-labelled), knowledge excerpts, recent decisions, similar past concepts and constraints.
 - **Evaluator** — independent second model (labeled 1–5 judgements) plus deterministic rule checks on *content* fields (AI transparency, privacy, platform safety, clichés, pillar alignment, personality); negated/safeguard phrasing is not a violation.
 - **Memory** — operational (SQLite), knowledge (`knowledge/jovi/*.md`), semantic (interface + lexical baseline).
@@ -245,7 +263,7 @@ npm test                    # no network, no API keys, no LM Studio required
 npm run build
 npm run test:lmstudio       # LM Studio adapter + flow suites (fake LM Studio server)
 npm run test:lmstudio:real  # REAL LM Studio end to end (needs the server running with a model loaded)
-npm run test:production     # Phase 8 contracts, media providers (fake ComfyUI server), pipeline e2e
+npm run test:production     # Phase 8–9 + safety gate: contracts, media providers (fake servers/binaries), generation, regeneration, pipeline e2e
 npm run test:production:real  # REAL LM Studio run of the Phase 8 text agents (script/storyboard/prompts/QA)
 JOVI_MEDIA_REAL=1 npx vitest run tests/integration/media.real.test.ts   # REAL media providers that are configured
 ```
@@ -259,6 +277,16 @@ docker compose up --build   # API on 127.0.0.1:3000, data in ./data
 ```
 
 LM Studio runs on the host; the container reaches it at `host.docker.internal:1234` (override with `LM_STUDIO_URL_DOCKER`).
+
+- **Hardening (R-14).** The container runs as the `node` user with:
+  - a read-only root filesystem: only `./data` and a 64 MB `/tmp` are writable;
+  - all Linux capabilities dropped, and `no-new-privileges`;
+  - 2 GB memory, 2 CPU and 256 PID limits.
+
+  The CI job "Container (hardened compose)" builds the image and checks these settings on a running container.
+- **`./data` permissions.** `./data` must be writable by uid 1000 (`sudo chown 1000:1000 data` on Linux; Docker Desktop handles this on macOS).
+- **The owner token** is printed once in `docker compose logs jovi-core` on first start.
+- **No ffmpeg, ffprobe or `say` in the image (D-18).** In the container the render and macOS voice providers report `NOT_CONFIGURED`, so productions stop `BLOCKED` at the render step. For real renders run Jovi on the host, or build a derived image with ffmpeg and pin it (`JOVI_FFMPEG_PATH` + `JOVI_FFMPEG_SHA256`).
 
 ## Observability & cost
 

@@ -1,4 +1,10 @@
-# Jovi Core v0.1 — API image
+# Jovi Core — API image
+#
+# Not included (by design, R-14 / D-18): ffmpeg, ffprobe and macOS `say`. In the
+# container the ffmpeg render provider and macos-say report NOT_CONFIGURED, so
+# productions stop BLOCKED at the render step. Run Jovi on the host (e.g. macOS
+# with `brew install ffmpeg`) for real renders, or build a derived image that
+# installs ffmpeg and pins it with JOVI_FFMPEG_PATH + JOVI_FFMPEG_SHA256.
 # Base images are pinned by digest (R-07): node:22-bookworm-slim (Node 22.23.3, resolved 2026-10-03).
 # Dependabot (docker ecosystem) proposes digest updates.
 FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS build

@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { ProviderError } from '../../core/errors.js';
-import { getJson, postJson } from '../../models/providers/http.js';
+import { BYTE_CAPS, getJson, postJson, readBodyCapped } from '../../models/providers/http.js';
 
 const PROVIDER = 'comfyui';
 
@@ -73,12 +72,13 @@ export class ComfyUIClient {
   }
 
   /**
-   * Uploads a local image into ComfyUI's input folder and returns the name a
-   * LoadImage node expects ("subfolder/name"). Callers validate the path.
+   * Uploads image bytes into ComfyUI's input folder and returns the name a
+   * LoadImage node expects ("subfolder/name"). Callers read the bytes through
+   * MediaStore.readInput (confined, no symlinks — R-09).
    */
-  async uploadImage(path: string, timeoutMs = 60_000): Promise<string> {
+  async uploadImage(filename: string, bytes: Buffer, timeoutMs = 60_000): Promise<string> {
     const form = new FormData();
-    form.append('image', new Blob([readFileSync(path)]), basename(path));
+    form.append('image', new Blob([new Uint8Array(bytes)]), basename(filename));
     form.append('type', 'input');
     form.append('subfolder', 'jovi');
     form.append('overwrite', 'true');
@@ -89,12 +89,19 @@ export class ComfyUIClient {
       throw new ProviderError(PROVIDER, `upload failed: ${(error as Error).message}`, { retryable: true, cause: error });
     }
     if (!response.ok) throw new ProviderError(PROVIDER, `upload HTTP ${response.status}`, { retryable: response.status >= 500, status: response.status });
-    const data = (await response.json()) as { name?: string; subfolder?: string };
+    let data: { name?: string; subfolder?: string };
+    try {
+      data = JSON.parse((await readBodyCapped(response, BYTE_CAPS.json, PROVIDER)).toString('utf8')) as { name?: string; subfolder?: string };
+    } catch (error) {
+      if (error instanceof ProviderError) throw error;
+      throw new ProviderError(PROVIDER, 'upload returned invalid JSON', { retryable: true, cause: error });
+    }
     if (!data.name) throw new ProviderError(PROVIDER, 'upload returned no file name', { retryable: false });
     return data.subfolder ? `${data.subfolder}/${data.name}` : data.name;
   }
 
-  async download(file: ComfyUIOutputFile, timeoutMs = 60_000): Promise<Buffer> {
+  /** Downloads an output file; `maxBytes` bounds memory use (R-15). */
+  async download(file: ComfyUIOutputFile, maxBytes: number, timeoutMs = 60_000): Promise<Buffer> {
     const query = new URLSearchParams({ filename: file.filename, subfolder: file.subfolder, type: file.type });
     let response: Response;
     try {
@@ -103,7 +110,7 @@ export class ComfyUIClient {
       throw new ProviderError(PROVIDER, `download failed: ${(error as Error).message}`, { retryable: true, cause: error });
     }
     if (!response.ok) throw new ProviderError(PROVIDER, `download HTTP ${response.status}`, { retryable: response.status >= 500, status: response.status });
-    return Buffer.from(await response.arrayBuffer());
+    return readBodyCapped(response, maxBytes, PROVIDER);
   }
 }
 

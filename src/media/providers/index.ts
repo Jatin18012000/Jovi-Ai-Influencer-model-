@@ -26,8 +26,8 @@ export function createMediaProvidersFromConfig(config: JoviConfig, store: MediaS
   }
   const m = config.media;
   return [
-    new ComfyUIImageProvider({ url: m.comfyuiUrl, workflowPath: m.comfyuiImageWorkflow, timeoutMs: m.comfyuiTimeoutMs }, store),
-    new ComfyUIVideoProvider({ url: m.comfyuiUrl, workflowPath: m.comfyuiVideoWorkflow, timeoutMs: m.comfyuiTimeoutMs }, store),
+    new ComfyUIImageProvider({ url: m.comfyuiUrl, workflowPath: m.comfyuiImageWorkflow, workflowSha256: m.pins.imageWorkflow, timeoutMs: m.comfyuiTimeoutMs }, store),
+    new ComfyUIVideoProvider({ url: m.comfyuiUrl, workflowPath: m.comfyuiVideoWorkflow, workflowSha256: m.pins.videoWorkflow, timeoutMs: m.comfyuiTimeoutMs }, store),
     new GoogleFlowVideoProvider(),
     new MacOSSayVoiceProvider({ sayPath: m.sayPath, voice: m.sayVoice, timeoutMs: m.voiceTimeoutMs }, store),
     new ElevenLabsVoiceProvider({ ...m.elevenlabs, timeoutMs: m.voiceTimeoutMs }, store),

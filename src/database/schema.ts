@@ -433,6 +433,27 @@ export const apiCredentials = sqliteTable(
     lastUsedAt: text('last_used_at'),
     revokedAt: text('revoked_at'),
     revokedBy: text('revoked_by'),
+    /** R-13: optional expiry; also set on the old credential during a rotation (rollover window). */
+    expiresAt: text('expires_at'),
   },
   (t) => [uniqueIndex('api_credentials_name_uq').on(t.name), uniqueIndex('api_credentials_token_hash_uq').on(t.tokenHash)],
 );
+
+// ---------------------------------------------------------------------------
+// Audit retention (R-18)
+// ---------------------------------------------------------------------------
+
+/**
+ * When old events are pruned by retention, the hash of the last pruned event
+ * is kept here so the remaining chain still verifies from that checkpoint.
+ */
+export const auditCheckpoints = sqliteTable('audit_checkpoints', {
+  id: text('id').primaryKey(),
+  /** Sequence of the last pruned event. */
+  sequence: integer('sequence').notNull(),
+  /** Hash of the last pruned event (the expected prev_hash of the next one). */
+  hash: text('hash').notNull(),
+  prunedEvents: integer('pruned_events').notNull(),
+  prunedBefore: text('pruned_before').notNull(),
+  createdAt: createdAt(),
+});
