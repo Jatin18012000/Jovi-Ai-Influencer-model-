@@ -76,16 +76,20 @@ export class ExpensiveCallLimiter {
     private readonly now: () => number = Date.now,
   ) {}
 
-  /** Throws RateLimitedError, or returns a release function that must be called when done. */
-  acquire(clientKey: string): () => void {
+  /**
+   * Throws RateLimitedError, or returns a release function that must be called when done.
+   * `heldElsewhere` counts slots already held outside this process's in-flight
+   * calls — unfinished async jobs (R-05) — so async requests cannot bypass the cap.
+   */
+  acquire(clientKey: string, heldElsewhere = 0): () => void {
     const now = this.now();
     const recent = (this.hits.get(clientKey) ?? []).filter((t) => now - t < 60_000);
     if (recent.length >= this.perMinute) {
       const retryAfter = Math.max(1, Math.ceil((60_000 - (now - (recent[0] ?? now))) / 1000));
       throw new RateLimitedError(`Rate limit exceeded: ${this.perMinute} expensive requests per minute`, retryAfter);
     }
-    if (this.active >= this.maxConcurrent) {
-      throw new RateLimitedError(`Too many goals in progress (max ${this.maxConcurrent} concurrent)`, 5);
+    if (this.active + heldElsewhere >= this.maxConcurrent) {
+      throw new RateLimitedError(`Too many goals in progress (max ${this.maxConcurrent} concurrent, including queued async jobs)`, 5);
     }
     recent.push(now);
     this.hits.set(clientKey, recent);
@@ -97,5 +101,63 @@ export class ExpensiveCallLimiter {
         this.active -= 1;
       }
     };
+  }
+}
+
+/**
+ * R-05: sliding one-minute rate limit for state-changing, non-model routes
+ * (memory writes, approval decisions, visual identity versions).
+ */
+export class WriteRateLimiter {
+  private readonly hits = new Map<string, number[]>();
+
+  constructor(
+    private readonly perMinute: number,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  /** Throws RateLimitedError when `key` exceeded the limit in the last minute. */
+  hit(key: string): void {
+    const now = this.now();
+    const recent = (this.hits.get(key) ?? []).filter((t) => now - t < 60_000);
+    if (recent.length >= this.perMinute) {
+      const retryAfter = Math.max(1, Math.ceil((60_000 - (now - (recent[0] ?? now))) / 1000));
+      throw new RateLimitedError(`Rate limit exceeded: ${this.perMinute} write requests per minute`, retryAfter);
+    }
+    recent.push(now);
+    this.hits.set(key, recent);
+    if (this.hits.size > 10_000) this.hits.delete(this.hits.keys().next().value as string);
+  }
+}
+
+/**
+ * R-08: records authentication/authorization failures as events, throttled
+ * per client so a flood of bad requests cannot flood the audit log. Failures
+ * beyond the per-minute budget are counted and reported on the next event.
+ */
+export class AuthFailureRecorder {
+  private readonly windows = new Map<string, { start: number; count: number; suppressed: number }>();
+
+  constructor(
+    private readonly record: (payload: Record<string, unknown>) => void,
+    private readonly perMinute = 20,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  failure(clientKey: string, payload: Record<string, unknown>): void {
+    const now = this.now();
+    let w = this.windows.get(clientKey);
+    if (!w || now - w.start >= 60_000) {
+      w = { start: now, count: 0, suppressed: w && now - w.start >= 60_000 ? w.suppressed : 0 };
+      this.windows.set(clientKey, w);
+    }
+    if (w.count >= this.perMinute) {
+      w.suppressed += 1;
+      return;
+    }
+    w.count += 1;
+    this.record({ ...payload, client: clientKey, suppressedSinceLastEvent: w.suppressed });
+    w.suppressed = 0;
+    if (this.windows.size > 10_000) this.windows.delete(this.windows.keys().next().value as string);
   }
 }

@@ -128,6 +128,8 @@ npm run jovi -- --visual-identity                           # active visual iden
 npm run jovi -- --set-visual-identity profile.json --summary "<why>" [--yes]   # HUMAN: lock appearance (retype "identity")
 npm run jovi -- --api-token create --name <name> --scopes read,operate[,approve,identity-admin]   # token shown once
 npm run jovi -- --api-token list | --api-token revoke --name <name>
+npm run jovi -- --audit-verify                              # verify the event hash chain; prints the head hash
+npm run jovi -- --media-gc [--dry-run] [--older-than-days 7] # delete files of SUPERSEDED media (records kept)
 ```
 
 Actor fields (`reviewer`, `requestedBy`, `approvedBy`) are never typed in: the CLI uses the local OS account and the API uses the credential principal (`api:<name>`). Interactive confirmations need a TTY; scripts must pass `--yes`.
@@ -150,6 +152,7 @@ Every route except `/health` requires `Authorization: Bearer <token>` with the r
 | GET | `/api/tasks/:id` | Task + its jobs |
 | GET | `/api/jobs/:id` | Job |
 | GET | `/api/decisions/:id` | Decision (options, selection, evaluation, models used) |
+| GET | `/api/audit/verify` | (`approve` scope) Verify the event hash chain; returns its head `{sequence, hash}` |
 | GET | `/api/events` | Events (`type`, `correlationId`, `entityId`, `afterSequence`, `limit`) |
 | POST | `/api/memory` | Add untrusted external memory (restricted types; see Security) |
 | GET | `/api/memory` | List (`type`, `key`, `includeExpired`) or search (`q`) memory |
@@ -177,6 +180,22 @@ Every route except `/health` requires `Authorization: Bearer <token>` with the r
 - **Authentication is mandatory** (security remediation R-01/R-04, see `docs/audit/14-p0-remediation-status.md`). Credentials are 256-bit `jovi_…` tokens stored as SHA-256 hashes in `api_credentials`, each with scopes `read` / `operate` / `approve` / `identity-admin`, revocable by name (names are never reused). An optional `JOVI_API_TOKEN` (≥ 32 characters) is an operator token with `JOVI_API_TOKEN_SCOPES` (default `read,operate`). Who approved, regenerated or changed visual identity is always the authenticated principal.
 - **Host/Origin allow-list:** `localhost`, `127.0.0.1`, `::1`, the bind host and `JOVI_ALLOWED_HOSTS`; browser `Origin`s must use one of those hosts or be listed in `JOVI_ALLOWED_ORIGINS`. Responses carry `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, a deny-all CSP and `Cache-Control: no-store`.
 - **Bind guard:** a non-loopback `HOST` requires `JOVI_ALLOW_NETWORK_BIND=true` and logs a plain-HTTP warning (put TLS in front). Expensive endpoints are rate limited per client (`JOVI_GOAL_RATE_LIMIT_PER_MINUTE`) and capped in concurrency (`JOVI_MAX_CONCURRENT_GOALS`).
+- **Resource limits** (R-05):
+  - Async jobs keep holding their concurrency slot until they finish, so `"mode": "async"` cannot bypass `JOVI_MAX_CONCURRENT_GOALS`.
+  - The job queue is capped (`JOVI_MAX_QUEUED_JOBS`).
+  - Memory, decision and visual-identity writes are rate limited per principal (`JOVI_WRITE_RATE_LIMIT_PER_MINUTE`), and external memory has a total cap.
+  - Fastify's `requestTimeout` stops slow clients.
+  - Regenerations are capped per production.
+  - The media directory has a quota (`JOVI_MEDIA_QUOTA_MB`), and the worker deletes the files of `SUPERSEDED` assets after `JOVI_SUPERSEDED_RETENTION_DAYS`. Asset records are kept.
+  - A daily estimated cloud budget (`JOVI_DAILY_CLOUD_BUDGET_USD`) excludes cloud models and cloud media providers once spent.
+- **Context selection** (R-06): memory below a relevance floor is never included. Trusted (seed) memory gets reserved slots (6 of 10), and untrusted API memory is capped at 2 items per context.
+- **Audit integrity** (R-08):
+  - Every event row is hash-chained (`hash = sha256(prev_hash ‖ row)`); `npm run jovi -- --audit-verify` checks the chain and prints its head. Record the head outside the machine.
+  - Approval, rejection, visual-identity and credential events are *protected*: only the owning service, holding a capability issued once at bootstrap, can emit them.
+  - The publishing gate reports "approval not attested" unless an `APPROVED` status matches a chain-valid `PRODUCTION_APPROVED` event with the same reviewer.
+  - 401/403 refusals are stored as `API_AUTH_FAILED` events, throttled per client.
+  - Every external process execution is logged: binary, arguments with paths redacted, duration and exit code.
+- **Supply chain** (R-07): `.github/workflows/ci.yml` runs typecheck, tests, build, `npm audit`, osv-scanner, a gitleaks scan of the full history and an SBOM artifact. It uses a read-only token, SHA-pinned actions and checksum-verified scanners. Dependabot covers npm, actions and the Docker base image, which is pinned by digest. Branch protection is an owner step: see `docs/security/sdlc-runbook.md`.
 - **Pre-generation safety gate** (R-02): after the visual prompts and before **any** media request, the `safety-review` agent runs the identity/safety heuristics and an independent model review against a fixed rubric (adult only, AI transparency, identity consistency, no real-person likeness, platform safety). Anything but a full ALLOW — including a model error or invalid output — is `BLOCK` (fail-closed) and the production stops `BLOCKED`. `MediaService` independently refuses to call a provider without a current ALLOW review (`SAFETY_REVIEW_REQUIRED` / `_BLOCKED` / `_STALE`). Pattern checks are labelled `HEURISTIC` in QA: they are not proof of compliance.
 - **Enforced permissions:** agents receive no services — only a per-run **ToolKit** whose every method checks the agent's allow-list and level (capped at `JOVI_MAX_PERMISSION_LEVEL`). Every call, allowed or denied, is stored in `agent_runs.tool_calls`. There are no shell, filesystem, credential, publishing or infrastructure tools. Executive = `LEVEL_2_MODIFY`.
 - **Next actions:** required level = max(text classification, owning agent's level). External (`LEVEL_4+`) or unknown-owner actions are `REQUIRES_APPROVAL`.

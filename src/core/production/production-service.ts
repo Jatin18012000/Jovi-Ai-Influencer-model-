@@ -4,7 +4,7 @@ import type { JoviDatabase } from '../../database/client.js';
 import { productionArtifacts, productions } from '../../database/schema.js';
 import { MediaKind, type AssetStatus, type EventType, type ProductionStatus, type QAStatus } from '../../types/enums.js';
 import { ConflictError, NotFoundError, ValidationError, serializeError } from '../errors.js';
-import type { CorrelationScope } from '../events/event-bus.js';
+import type { CorrelationScope, EventAttestation, EventBus } from '../events/event-bus.js';
 import { newId, nowIso } from '../ids.js';
 import { INACTIVE_ASSET_STATUSES, type AssetService } from './asset-service.js';
 import { evaluatePublishingGate, type PublishingGateResult } from './publishing-gate.js';
@@ -74,6 +74,10 @@ export class ProductionService {
   constructor(
     private readonly db: JoviDatabase,
     private readonly assets: AssetService,
+    /** R-08: approval/rejection events are attested; the publishing gate reconciles state with them. */
+    private readonly audit: { bus: EventBus; attestation: EventAttestation },
+    /** R-05: human-requested media regenerations allowed per production. */
+    private readonly maxRegenerations = 5,
   ) {}
 
   create(
@@ -227,6 +231,10 @@ export class ProductionService {
     const production = this.get(id);
     const status = production.status as ProductionStatus;
     if (!HUMAN_GATED_FROM.includes(status)) throw new ConflictError(`Production in status ${status} cannot regenerate media (only BLOCKED or AWAITING_HUMAN_APPROVAL)`);
+    const previous = this.regenerationCount(id);
+    if (previous >= this.maxRegenerations) {
+      throw new ConflictError(`Production ${id} reached the media regeneration limit (${this.maxRegenerations}); start a new production instead`);
+    }
     for (const kind of ['SCRIPT', 'STORYBOARD', 'VISUAL_PROMPTS'] as const) {
       if (!this.latestArtifact(id, kind)) throw new ConflictError(`Production has no ${kind} artifact; start a new production instead`);
     }
@@ -248,8 +256,32 @@ export class ProductionService {
     return this.transition(id, 'SAFETY_REVIEW', scope, { qaStatus: null, error: null });
   }
 
+  /** Number of human-requested media regenerations recorded for a production. */
+  regenerationCount(id: string): number {
+    return this.audit.bus.list({ entityId: id, eventType: 'MEDIA_REGENERATION_REQUESTED', limit: 1000 }).length;
+  }
+
   publishingGate(id: string): PublishingGateResult {
-    return evaluatePublishingGate(this.get(id), this.assets.list(id));
+    const production = this.get(id);
+    return evaluatePublishingGate(production, this.assets.list(id), this.approvalAttestationBlocker(production));
+  }
+
+  /**
+   * R-08: an APPROVED status counts only when a matching, hash-chain-valid
+   * PRODUCTION_APPROVED event (emitted by this service with the attestation
+   * capability) names the same reviewer. A status set by editing the
+   * database alone is reported as "approval not attested".
+   */
+  private approvalAttestationBlocker(production: Production): string | null {
+    if (production.status !== 'APPROVED') return null;
+    const event = this.audit.bus.list({ entityId: production.id, eventType: 'PRODUCTION_APPROVED', limit: 5 }).at(-1);
+    if (!event) return 'approval not attested: no PRODUCTION_APPROVED event exists for this production';
+    if (event.source !== SOURCE || event.payload.reviewer !== production.approvedBy) {
+      return `approval not attested: the approval event does not match the recorded approver (${production.approvedBy ?? 'none'})`;
+    }
+    const integrity = this.audit.bus.verifyEvent(event.eventId);
+    if (!integrity.ok) return `approval not attested: approval event failed the audit hash chain (${integrity.reason})`;
+    return null;
   }
 
   private transition(id: string, to: ProductionStatus, scope: CorrelationScope, fields: Partial<Production>): Production {
@@ -266,8 +298,8 @@ export class ProductionService {
     if (to === 'AWAITING_HUMAN_APPROVAL') scope.emit('CREATIVE_PRODUCTION_COMPLETED', SOURCE, id, { ...payload, qaStatus: current.qaStatus });
     if (to === 'BLOCKED') scope.emit('CREATIVE_PRODUCTION_BLOCKED', SOURCE, id, { ...payload, qaStatus: current.qaStatus });
     if (to === 'FAILED') scope.emit('CREATIVE_PRODUCTION_FAILED', SOURCE, id, { ...payload, error: fields.error ?? null });
-    if (to === 'APPROVED') scope.emit('PRODUCTION_APPROVED', SOURCE, id, { ...payload, reviewer: fields.approvedBy });
-    if (to === 'REJECTED') scope.emit('PRODUCTION_REJECTED', SOURCE, id, { ...payload, reviewer: fields.approvedBy });
+    if (to === 'APPROVED') scope.emit('PRODUCTION_APPROVED', SOURCE, id, { ...payload, reviewer: fields.approvedBy }, this.audit.attestation);
+    if (to === 'REJECTED') scope.emit('PRODUCTION_REJECTED', SOURCE, id, { ...payload, reviewer: fields.approvedBy }, this.audit.attestation);
     return this.get(id);
   }
 

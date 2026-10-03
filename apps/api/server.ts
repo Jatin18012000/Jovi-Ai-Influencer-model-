@@ -10,7 +10,7 @@ import { ExternalMemoryInputSchema } from '../../src/memory/operational/operatio
 import { assessCompetition } from '../../src/models/competition/model-competition.js';
 import { EvaluableOptionSchema } from '../../src/models/evaluator/rule-checks.js';
 import { EventType, MemoryType } from '../../src/types/enums.js';
-import { checkHostAndOrigin, ExpensiveCallLimiter } from './security.js';
+import { AuthFailureRecorder, checkHostAndOrigin, ExpensiveCallLimiter, WriteRateLimiter } from './security.js';
 import type { ApiScope, Principal } from '../../src/core/auth/api-credentials.js';
 
 declare module 'fastify' {
@@ -64,15 +64,23 @@ const EvaluateBody = z.union([
  * Fastify API. Handlers are thin: validate with Zod, delegate to the core,
  * shape the response. All business logic lives in `src/`.
  */
-export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCallLimiter } = {}): FastifyInstance {
+export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCallLimiter; writeLimiter?: WriteRateLimiter } = {}): FastifyInstance {
   const app = Fastify({
     loggerInstance: core.logger.child({ component: 'api' }) as FastifyBaseLogger,
     bodyLimit: 256 * 1024,
+    // R-05: a client gets this long to send the whole request (slow-client defence).
+    // It does not limit how long a handler may run.
+    requestTimeout: core.config.api.requestTimeoutMs,
   });
   const limiter = options.limiter ?? new ExpensiveCallLimiter(core.config.api.goalRateLimitPerMinute, core.config.api.maxConcurrentGoals);
-  /** Runs an expensive (model-calling) handler under the rate limit and concurrency cap. */
+  const writeLimiter = options.writeLimiter ?? new WriteRateLimiter(core.config.api.writeRateLimitPerMinute);
+  /**
+   * Runs an expensive (model-calling) handler under the rate limit and
+   * concurrency cap. Unfinished async jobs keep holding their slot (R-05).
+   */
   const guarded = async <T>(clientKey: string, fn: () => Promise<T>): Promise<T> => {
-    const release = limiter.acquire(clientKey);
+    core.jobs.assertCapacity();
+    const release = limiter.acquire(clientKey, core.jobs.countPendingAsync());
     try {
       return await fn();
     } finally {
@@ -82,6 +90,10 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
 
   const { allowedHosts, allowedOrigins } = core.config.api;
   const PUBLIC_ROUTES = new Set(['/health']);
+  // R-08: auth failures become (throttled) audit events, not only log lines.
+  const authFailures = new AuthFailureRecorder((payload) => core.events.emit({ eventType: 'API_AUTH_FAILED', source: 'api.auth', payload }));
+  const refuse = (request: FastifyRequest, reason: string, extra: Record<string, unknown> = {}) =>
+    authFailures.failure(request.ip, { reason, method: request.method, path: request.url.split('?')[0]?.slice(0, 200) ?? '', ...extra });
 
   /**
    * Security remediation R-01/R-04. Every request:
@@ -97,6 +109,7 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
     const refusal = checkHostAndOrigin({ host: request.headers.host, origin: request.headers.origin }, allowedHosts, allowedOrigins);
     if (refusal) {
       request.log.warn({ security: 'HOST_OR_ORIGIN_REFUSED', reason: refusal, url: request.url }, 'request refused');
+      refuse(request, 'HOST_OR_ORIGIN_REFUSED', { host: String(request.headers.host ?? '').slice(0, 200), origin: request.headers.origin ? String(request.headers.origin).slice(0, 200) : null });
       return reply.code(403).send({ error: 'FORBIDDEN_HOST_OR_ORIGIN', message: 'Request refused: host or origin not allowed' });
     }
     if (PUBLIC_ROUTES.has(request.url.split('?')[0] ?? '')) return;
@@ -105,11 +118,13 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
     const principal = header.startsWith('Bearer ') ? core.credentials.verify(header.slice(7).trim()) : null;
     if (!principal) {
       request.log.warn({ security: 'AUTHENTICATION_FAILED', url: request.url, reason: header ? 'invalid credential' : 'missing credential' }, 'request refused');
+      refuse(request, header ? 'INVALID_CREDENTIAL' : 'MISSING_CREDENTIAL');
       return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'Missing or invalid bearer token' });
     }
     const required: ApiScope = request.routeOptions.config?.scope ?? (request.method === 'GET' || request.method === 'HEAD' ? 'read' : 'operate');
     if (!principal.scopes.includes(required)) {
       request.log.warn({ security: 'AUTHORIZATION_FAILED', principal: principal.id, required, url: request.url }, 'request refused');
+      refuse(request, 'MISSING_SCOPE', { principal: principal.id, required });
       return reply.code(403).send({ error: 'FORBIDDEN_SCOPE', message: `This credential lacks the "${required}" scope` });
     }
     request.principal = principal;
@@ -170,6 +185,8 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
       mediaProviders: (await core.mediaProviders.statuses()).map((m) => ({ provider: m.provider, mediaKind: m.mediaKind, kind: m.kind, available: m.available, state: m.state, reason: m.reason })),
       mediaSimulationMode: core.mediaProviders.isSimulation(),
       anyModelAvailable: statuses.some((s) => s.available),
+      cloudBudget: { dailyLimitUsd: core.budget.dailyLimitUsd, spentTodayUsd: core.budget.spentTodayUsd(), exhausted: core.budget.exhaustedReason() },
+      jobs: { pending: core.jobs.countPending(), pendingAsync: core.jobs.countPendingAsync(), maxQueued: core.config.jobs.maxQueued },
       uptimeSeconds: Math.round(process.uptime()),
     };
   });
@@ -257,6 +274,7 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
     const { id } = IdParams.parse(request.params);
     // The reviewer is the authenticated principal; a body-supplied reviewer is rejected.
     const body = HumanDecisionSchema.omit({ reviewer: true }).strict().parse(request.body ?? {});
+    writeLimiter.hit(`decision:${actor(request)}`);
     const decision = { ...body, reviewer: actor(request) };
     const production = core.productions.get(id);
     const updated = core.productions.recordHumanDecision(id, decision, core.events.scope(production.correlationId));
@@ -295,8 +313,8 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
   app.post('/api/visual-identity', { config: { scope: 'identity-admin' } }, async (request, reply) => {
     const body = VisualIdentityVersionInputSchema.omit({ approvedBy: true }).strict().parse(request.body ?? {});
     const approvedBy = actor(request);
+    writeLimiter.hit(`visual-identity:${approvedBy}`);
     const active = core.visualIdentity.createVersion(body.profile, approvedBy, body.changeSummary);
-    core.events.scope(newId('correlation')).emit('VISUAL_IDENTITY_VERSION_CREATED', 'api', null, { version: active.version, status: active.status, approvedBy });
     return reply.code(201).send({ active, versions: core.visualIdentity.listVersions() });
   });
 
@@ -323,6 +341,12 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
     return { decision: core.decisions.get(id) };
   });
 
+  /**
+   * R-08: verifies the whole event hash chain and returns its head (sequence +
+   * hash) so it can be recorded outside this machine. O(events): approve scope.
+   */
+  app.get('/api/audit/verify', { config: { scope: 'approve' } }, async () => ({ chain: core.events.verifyChain() }));
+
   app.get('/api/events', async (request) => {
     const q = EventsQuery.parse(request.query);
     const events = core.events.list({
@@ -341,6 +365,7 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
   // importance, and it can never overwrite seed/agent memory (see writeExternal).
   app.post('/api/memory', async (request, reply) => {
     const body = ExternalMemoryInputSchema.parse(request.body ?? {});
+    writeLimiter.hit(`memory:${actor(request)}`);
     const scope = core.events.scope(newId('correlation'));
     const { item, created } = core.memory.writeExternal(body, scope);
     return reply.code(created ? 201 : 200).send({ item, created });

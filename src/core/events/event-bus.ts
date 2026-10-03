@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
 import { EventType } from '../../types/enums.js';
 import type { Logger } from '../config/logger.js';
+import { PermissionDeniedError } from '../errors.js';
 import { newId, nowIso } from '../ids.js';
 
 export const EVENT_SCHEMA_VERSION = 1;
@@ -21,6 +23,70 @@ export const JoviEventSchema = z.object({
 
 export type JoviEvent = z.infer<typeof JoviEventSchema>;
 
+/**
+ * Security remediation R-08. Events that attest a human decision or a
+ * security-relevant change. Only services holding the bus's attestation
+ * capability (handed out once, at bootstrap) may emit them; agents, routes
+ * and other components cannot forge them through the generic emit path.
+ */
+export const PROTECTED_EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
+  'PRODUCTION_APPROVED',
+  'PRODUCTION_REJECTED',
+  'VISUAL_IDENTITY_VERSION_CREATED',
+  'API_CREDENTIAL_CREATED',
+  'API_CREDENTIAL_REVOKED',
+]);
+
+/** Opaque capability that authorises emitting PROTECTED_EVENT_TYPES. */
+export interface EventAttestation {
+  readonly __brand: 'EventAttestation';
+}
+
+/** Hash of the (virtual) event before the first chained one. */
+export const GENESIS_HASH = '0'.repeat(64);
+
+interface ChainRow {
+  id: string;
+  event_type: string;
+  timestamp: string;
+  source: string;
+  entity_id: string | null;
+  payload: string;
+  schema_version: number;
+  correlation_id: string | null;
+  causation_id: string | null;
+  sequence: number;
+  prev_hash: string | null;
+  hash: string | null;
+}
+
+/** sha256(prevHash ‖ canonical row). The payload is hashed exactly as stored. */
+export function eventHash(prevHash: string, row: Omit<ChainRow, 'prev_hash' | 'hash'>): string {
+  const canonical = JSON.stringify([
+    row.id,
+    row.event_type,
+    row.timestamp,
+    row.source,
+    row.entity_id,
+    row.payload,
+    row.schema_version,
+    row.correlation_id,
+    row.causation_id,
+    row.sequence,
+  ]);
+  return createHash('sha256').update(prevHash).update('\n').update(canonical).digest('hex');
+}
+
+export interface ChainVerification {
+  ok: boolean;
+  /** Chained events checked. */
+  checked: number;
+  /** Events written before the hash chain existed (a contiguous prefix; not verifiable). */
+  legacyUnchained: number;
+  head: { sequence: number; hash: string } | null;
+  firstBreak: { sequence: number; eventId: string; reason: string } | null;
+}
+
 export interface EmitInput {
   eventType: EventType;
   source: string;
@@ -28,6 +94,8 @@ export interface EmitInput {
   payload?: Record<string, unknown>;
   correlationId?: string | null;
   causationId?: string | null;
+  /** Required for PROTECTED_EVENT_TYPES. */
+  attestation?: EventAttestation;
 }
 
 export type EventHandler = (event: JoviEvent) => void | Promise<void>;
@@ -50,21 +118,45 @@ export interface EventQuery {
  */
 export class EventBus {
   private readonly handlers = new Map<EventType | '*', Set<EventHandler>>();
-  private readonly insert: Database.Statement;
+  private readonly append: Database.Transaction<(row: Omit<ChainRow, 'sequence' | 'prev_hash' | 'hash'>) => number>;
+  private readonly attestation: EventAttestation = Object.freeze({}) as EventAttestation;
+  private attestationIssued = false;
 
   constructor(
     private readonly sqlite: Database.Database,
     private readonly logger: Logger,
   ) {
-    this.insert = sqlite.prepare(`
-      INSERT INTO events (id, event_type, timestamp, source, entity_id, payload, schema_version, correlation_id, causation_id, sequence)
-      VALUES (@id, @eventType, @timestamp, @source, @entityId, @payload, @schemaVersion, @correlationId, @causationId,
-              (SELECT COALESCE(MAX(sequence), 0) + 1 FROM events))
-      RETURNING sequence
+    const last = sqlite.prepare('SELECT sequence, hash FROM events ORDER BY sequence DESC LIMIT 1');
+    const insert = sqlite.prepare(`
+      INSERT INTO events (id, event_type, timestamp, source, entity_id, payload, schema_version, correlation_id, causation_id, sequence, prev_hash, hash)
+      VALUES (@id, @event_type, @timestamp, @source, @entity_id, @payload, @schema_version, @correlation_id, @causation_id, @sequence, @prev_hash, @hash)
     `);
+    // Sequence and chain link are computed inside one write transaction, so
+    // concurrent writers (API + worker processes) serialise and never fork the chain.
+    this.append = sqlite.transaction((row) => {
+      const previous = last.get() as { sequence: number; hash: string | null } | undefined;
+      const sequence = (previous?.sequence ?? 0) + 1;
+      const prevHash = previous?.hash ?? GENESIS_HASH;
+      insert.run({ ...row, sequence, prev_hash: prevHash, hash: eventHash(prevHash, { ...row, sequence }) });
+      return sequence;
+    });
+  }
+
+  /**
+   * The capability for PROTECTED_EVENT_TYPES. Issued exactly once — bootstrap
+   * hands it to the owning services; a second request is refused.
+   */
+  issueAttestation(): EventAttestation {
+    if (this.attestationIssued) throw new PermissionDeniedError('the event attestation capability has already been issued');
+    this.attestationIssued = true;
+    return this.attestation;
   }
 
   emit(input: EmitInput): JoviEvent {
+    if (PROTECTED_EVENT_TYPES.has(input.eventType) && input.attestation !== this.attestation) {
+      this.logger.warn({ security: 'PROTECTED_EVENT_REFUSED', eventType: input.eventType, source: input.source }, 'protected event refused');
+      throw new PermissionDeniedError(`${input.eventType} events can only be emitted by the service that owns them`);
+    }
     const base = {
       eventId: newId('event'),
       eventType: EventType.parse(input.eventType),
@@ -76,18 +168,18 @@ export class EventBus {
       correlationId: input.correlationId ?? null,
       causationId: input.causationId ?? null,
     };
-    const row = this.insert.get({
+    const sequence = this.append.immediate({
       id: base.eventId,
-      eventType: base.eventType,
+      event_type: base.eventType,
       timestamp: base.timestamp,
       source: base.source,
-      entityId: base.entityId,
+      entity_id: base.entityId,
       payload: JSON.stringify(base.payload),
-      schemaVersion: base.schemaVersion,
-      correlationId: base.correlationId,
-      causationId: base.causationId,
-    }) as { sequence: number };
-    const event: JoviEvent = { ...base, sequence: row.sequence };
+      schema_version: base.schemaVersion,
+      correlation_id: base.correlationId,
+      causation_id: base.causationId,
+    });
+    const event: JoviEvent = { ...base, sequence };
 
     this.logger.debug(
       { eventId: event.eventId, eventType: event.eventType, entityId: event.entityId, correlationId: event.correlationId },
@@ -146,6 +238,44 @@ export class EventBus {
     }));
   }
 
+  /** Verifies the whole hash chain (R-08). Detects edited, deleted, reordered or inserted rows. */
+  verifyChain(): ChainVerification {
+    let checked = 0;
+    let legacyUnchained = 0;
+    let expectedPrev: string | null = null;
+    let head: ChainVerification['head'] = null;
+    let lastSequence = 0;
+    const fail = (row: ChainRow, reason: string): ChainVerification => ({ ok: false, checked, legacyUnchained, head, firstBreak: { sequence: row.sequence, eventId: row.id, reason } });
+    for (const row of this.sqlite.prepare('SELECT * FROM events ORDER BY sequence ASC').iterate() as IterableIterator<ChainRow>) {
+      if (row.sequence !== lastSequence + 1) return fail(row, `sequence gap: expected ${lastSequence + 1}`);
+      lastSequence = row.sequence;
+      if (row.hash === null) {
+        if (expectedPrev !== null) return fail(row, 'hash removed from a chained event');
+        legacyUnchained += 1;
+        continue;
+      }
+      const prev: string = expectedPrev ?? GENESIS_HASH;
+      if (row.prev_hash !== prev) return fail(row, 'link to the previous event does not match');
+      if (eventHash(prev, row) !== row.hash) return fail(row, 'content does not match its hash');
+      expectedPrev = row.hash;
+      checked += 1;
+      head = { sequence: row.sequence, hash: row.hash };
+    }
+    return { ok: true, checked, legacyUnchained, head, firstBreak: null };
+  }
+
+  /** Verifies one event's hash and its link to the preceding event (cheap; used by the publishing gate). */
+  verifyEvent(eventId: string): { ok: boolean; reason: string | null } {
+    const row = this.sqlite.prepare('SELECT * FROM events WHERE id = ?').get(eventId) as ChainRow | undefined;
+    if (!row) return { ok: false, reason: 'event not found' };
+    if (row.hash === null || row.prev_hash === null) return { ok: false, reason: 'event is not hash-chained' };
+    const previous = this.sqlite.prepare('SELECT hash FROM events WHERE sequence = ?').get(row.sequence - 1) as { hash: string | null } | undefined;
+    const expectedPrev = previous ? previous.hash : GENESIS_HASH;
+    if (row.prev_hash !== (expectedPrev ?? GENESIS_HASH)) return { ok: false, reason: 'link to the previous event does not match' };
+    if (eventHash(row.prev_hash, row) !== row.hash) return { ok: false, reason: 'content does not match its hash' };
+    return { ok: true, reason: null };
+  }
+
   /** Latest event in a correlation, used to resume causation chains across processes. */
   lastEventId(correlationId: string): string | null {
     const row = this.sqlite
@@ -189,7 +319,7 @@ export class CorrelationScope {
     this.lastEventId = causationId;
   }
 
-  emit(eventType: EventType, source: string, entityId: string | null, payload: Record<string, unknown> = {}): JoviEvent {
+  emit(eventType: EventType, source: string, entityId: string | null, payload: Record<string, unknown> = {}, attestation?: EventAttestation): JoviEvent {
     const event = this.bus.emit({
       eventType,
       source,
@@ -197,6 +327,7 @@ export class CorrelationScope {
       payload,
       correlationId: this.correlationId,
       causationId: this.lastEventId,
+      ...(attestation ? { attestation } : {}),
     });
     this.lastEventId = event.eventId;
     return event;

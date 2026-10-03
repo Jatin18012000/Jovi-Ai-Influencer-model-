@@ -77,6 +77,8 @@ export interface MediaRequirements {
   language?: string;
   /** LOCAL_ONLY excludes CLOUD providers (same rule as the model router). */
   privacy?: PrivacyRequirement;
+  /** R-05: set when cloud providers must not be used (e.g. the daily cloud budget is spent). */
+  cloudBlockedReason?: string;
 }
 
 /** Soft preferences: capable providers that satisfy them are tried first. */
@@ -88,6 +90,7 @@ export interface MediaPreferences {
 /** Returns why a provider cannot serve the requirements, or null if it can. */
 export function capabilityMismatch(kind: ProviderKind, caps: MediaCapabilities, req: MediaRequirements): string | null {
   if (req.privacy === 'LOCAL_ONLY' && kind === 'CLOUD') return 'privacy LOCAL_ONLY excludes cloud providers';
+  if (req.cloudBlockedReason && kind === 'CLOUD') return req.cloudBlockedReason;
   if (req.aspectRatio && !caps.aspectRatios.includes(req.aspectRatio)) return `aspect ratio ${req.aspectRatio} not supported`;
   if (req.durationSeconds !== undefined && caps.maxDurationSeconds !== null && req.durationSeconds > caps.maxDurationSeconds) {
     return `duration ${req.durationSeconds}s exceeds provider maximum ${caps.maxDurationSeconds}s`;

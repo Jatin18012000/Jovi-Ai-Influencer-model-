@@ -1,5 +1,7 @@
 # Jovi Core v0.1 — API image
-FROM node:22-bookworm-slim AS build
+# Base images are pinned by digest (R-07): node:22-bookworm-slim (Node 22.23.3, resolved 2026-10-03).
+# Dependabot (docker ecosystem) proposes digest updates.
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS build
 WORKDIR /app
 # Toolchain for better-sqlite3 in case no prebuilt binary matches the platform.
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
@@ -10,7 +12,7 @@ COPY apps ./apps
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \

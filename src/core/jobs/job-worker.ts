@@ -16,9 +16,13 @@ export class JobWorker {
     private readonly logger: Logger,
     private readonly pollMs: number,
     private readonly staleLockMs: number,
+    /** R-05: periodic housekeeping (superseded-media GC), run at start and then every `maintenanceMs`. */
+    private readonly maintenance: (() => void) | null = null,
+    private readonly maintenanceMs = 24 * 3_600_000,
   ) {}
 
   private lastRecovery = 0;
+  private lastMaintenance = 0;
 
   start(): void {
     if (this.running) return;
@@ -54,6 +58,14 @@ export class JobWorker {
       if (Date.now() - this.lastRecovery >= Math.min(this.staleLockMs, 60_000)) {
         this.lastRecovery = Date.now();
         await this.jobs.recoverStale(this.staleLockMs);
+      }
+      if (this.maintenance && Date.now() - this.lastMaintenance >= this.maintenanceMs) {
+        this.lastMaintenance = Date.now();
+        try {
+          this.maintenance();
+        } catch (error) {
+          this.logger.error({ err: errorMessage(error) }, 'worker maintenance failed');
+        }
       }
       worked = (await this.jobs.processNext()) !== null;
     } catch (error) {

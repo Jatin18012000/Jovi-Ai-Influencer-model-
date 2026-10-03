@@ -7,8 +7,10 @@ import { PLANNED_AGENTS } from '../agents/planned-agents.js';
 import { CreativeProductionPipeline } from '../agents/production/production-pipeline.js';
 import { MediaInspector } from '../media/media-inspector.js';
 import { ApiCredentialService } from './auth/api-credentials.js';
+import { CloudBudget } from './budget/cloud-budget.js';
 import { MediaProviderRegistry } from '../media/media-provider-registry.js';
 import { MediaStore } from '../media/media-store.js';
+import { setProcessAuditSink } from '../media/process-runner.js';
 import { createMediaProvidersFromConfig } from '../media/providers/index.js';
 import type { AnyMediaProvider } from '../media/types.js';
 import { VisualIdentityService } from './identity/visual-identity.js';
@@ -31,6 +33,7 @@ import { fromRoot } from './config/paths.js';
 import { DecisionService } from './decisions/decision-service.js';
 import { EventBus } from './events/event-bus.js';
 import { IdentityService } from './identity/identity-service.js';
+import { newId } from './ids.js';
 import { JobQueue } from './jobs/job-queue.js';
 import { JobWorker } from './jobs/job-worker.js';
 import { TaskService } from './jobs/task-service.js';
@@ -58,6 +61,8 @@ export interface JoviCore {
   jobRecovery: { requeued: number; failed: number; released: number };
   events: EventBus;
   credentials: ApiCredentialService;
+  /** R-05: daily cloud spend cap. */
+  budget: CloudBudget;
   tasks: TaskService;
   jobs: JobQueue;
   worker: JobWorker;
@@ -101,20 +106,32 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   const { db, sqlite } = database;
 
   const events = new EventBus(sqlite, logger.child({ component: 'events' }));
-  const credentials = new ApiCredentialService(db, events, { token: config.api.token, scopes: config.api.tokenScopes });
+  // R-08: the capability to emit protected (attesting) events goes only to the services that own them.
+  const attestation = events.issueAttestation();
+  const credentials = new ApiCredentialService(db, events, { token: config.api.token, scopes: config.api.tokenScopes }, attestation);
+  // R-08: every external process execution is logged (binary, redacted arguments, duration, exit code).
+  const processLogger = logger.child({ component: 'process' });
+  setProcessAuditSink((record) => processLogger.info({ audit: 'PROCESS_EXECUTED', ...record }, 'external process executed'));
+  // R-05: daily cloud spend cap shared by the model router and the media service.
+  const budget = new CloudBudget(sqlite, config.budget.dailyCloudUsd);
   const tasks = new TaskService(db);
   const jobs = new JobQueue(db, sqlite, events, logger.child({ component: 'jobs' }), {
     defaultMaxAttempts: config.jobs.maxAttempts,
     backoffMs: config.jobs.backoffMs,
     heartbeatMs: config.jobs.heartbeatMs,
+    maxQueued: config.jobs.maxQueued,
     ...(options.sleep ? { sleep: options.sleep } : {}),
   });
-  const worker = new JobWorker(jobs, logger.child({ component: 'worker' }), config.jobs.workerPollMs, config.jobs.staleMs);
+  // R-05: the worker also garbage-collects files of superseded media once a day.
+  const worker = new JobWorker(jobs, logger.child({ component: 'worker' }), config.jobs.workerPollMs, config.jobs.staleMs, () => {
+    const gc = media.collectSuperseded({ olderThanDays: config.media.supersededRetentionDays }, events.scope(newId('correlation')));
+    if (gc.assets) logger.info({ ...gc }, 'superseded media collected');
+  });
 
   const identity = new IdentityService(db);
   const strategy = new StrategyService(db);
   const decisions = new DecisionService(db);
-  const memory = new OperationalMemory(db, events);
+  const memory = new OperationalMemory(db, events, config.memory.maxExternalItems);
   const knowledge = new KnowledgeBase(fromRoot('knowledge', 'jovi'));
   const semantic = new KeywordSemanticMemory();
   const prompts = new PromptLibrary(fromRoot('prompts'));
@@ -125,6 +142,7 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   const router = new ModelRouter(providers, db, logger.child({ component: 'router' }), prompts, {
     cloudPreference: config.providers.cloudPreference,
     allowCloudFallback: config.providers.allowCloudFallback,
+    budget,
   });
   const evaluator = new Evaluator(router, prompts, db, logger.child({ component: 'evaluator' }));
   const contextEngine = new ContextEngine({ identity, strategy, memory, knowledge, semantic, decisions, providers });
@@ -132,15 +150,22 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   // Phase 8: visual identity, media providers, assets and productions.
   // Phase 9: capability-based provider selection with fallback and verified outputs.
   const mediaStore = new MediaStore(config.media.dir, config.media.referenceDir);
-  const visualIdentity = new VisualIdentityService(db, 'jovi', (path) => mediaStore.isReadableInput(path));
+  const visualIdentity = new VisualIdentityService(db, 'jovi', (path) => mediaStore.isReadableInput(path), { bus: events, attestation });
   if (config.database.autoSeed) visualIdentity.seed();
   const mediaProviders = new MediaProviderRegistry(config.media.providerPreference);
   for (const provider of options.mediaProviders ?? createMediaProvidersFromConfig(config, mediaStore)) mediaProviders.register(provider);
   const assets = new AssetService(db);
   const mediaInspector = new MediaInspector({ ffprobePath: config.media.ffprobePath });
-  const productions = new ProductionService(db, assets);
-  const media = new MediaService(mediaProviders, assets, mediaStore, mediaInspector, logger.child({ component: 'media' }), config.media.maxAttempts, (id) =>
-    productions.safetyClearance(id),
+  const productions = new ProductionService(db, assets, { bus: events, attestation }, config.media.maxRegenerations);
+  const media = new MediaService(
+    mediaProviders,
+    assets,
+    mediaStore,
+    mediaInspector,
+    logger.child({ component: 'media' }),
+    config.media.maxAttempts,
+    (id) => productions.safetyClearance(id),
+    { quotaBytes: config.media.quotaBytes, budget },
   );
 
   // Agents receive no services: only the runner holds them, behind the ToolKit.
@@ -212,6 +237,7 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
     jobRecovery,
     events,
     credentials,
+    budget,
     tasks,
     jobs,
     worker,

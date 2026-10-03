@@ -4,7 +4,7 @@ import type { JoviDatabase } from '../../database/client.js';
 import { jobs } from '../../database/schema.js';
 import type { JobStatus } from '../../types/enums.js';
 import type { Logger } from '../config/logger.js';
-import { JoviError, NotFoundError, ValidationError, errorMessage, isRetryable, serializeError } from '../errors.js';
+import { JoviError, NotFoundError, RateLimitedError, ValidationError, errorMessage, isRetryable, serializeError } from '../errors.js';
 import type { CorrelationScope, EventBus } from '../events/event-bus.js';
 import { newId, nowIso } from '../ids.js';
 
@@ -29,6 +29,8 @@ export interface JobQueueOptions {
   sleep?: (ms: number) => Promise<void>;
   /** How often a running (or reserved) job refreshes its lock, proving its owner is alive. */
   heartbeatMs?: number;
+  /** R-05: maximum non-terminal jobs; enqueue beyond it is refused (RateLimitedError → 429). */
+  maxQueued?: number;
 }
 
 const SOURCE = 'core.jobs';
@@ -69,6 +71,7 @@ export class JobQueue {
     scope: CorrelationScope,
   ): Job {
     if (!this.handlers.has(input.type)) throw new ValidationError(`No handler registered for job type ${input.type}`);
+    this.assertCapacity(input.type);
     const now = nowIso();
     const row = {
       id: newId('job'),
@@ -83,6 +86,7 @@ export class JobQueue {
       runAfter: now,
       // Reserved jobs are driven by their creator via run(); workers skip them.
       lockedAt: input.reserve ? now : null,
+      reserved: input.reserve ?? false,
       correlationId: scope.correlationId,
       createdAt: now,
       updatedAt: now,
@@ -92,6 +96,34 @@ export class JobQueue {
     this.db.insert(jobs).values(row).run();
     scope.emit('JOB_CREATED', SOURCE, row.id, { taskId: row.taskId, type: row.type, maxAttempts: row.maxAttempts });
     return row;
+  }
+
+  /**
+   * R-05: refuses new work when the queue is full. Entry points call it before
+   * creating tasks (no orphans); enqueue calls it again as the backstop.
+   */
+  assertCapacity(type = 'job'): void {
+    if (this.options.maxQueued === undefined) return;
+    const pending = this.countPending();
+    if (pending >= this.options.maxQueued) {
+      this.logger.warn({ security: 'QUEUE_FULL', pending, maxQueued: this.options.maxQueued, type }, 'job refused: queue full');
+      throw new RateLimitedError(`Job queue is full (${pending} unfinished jobs, max ${this.options.maxQueued})`, 30);
+    }
+  }
+
+  /** Unfinished jobs (QUEUED, RETRYING, RUNNING). */
+  countPending(): number {
+    return (this.sqlite.prepare("SELECT count(*) AS n FROM jobs WHERE status IN ('QUEUED','RETRYING','RUNNING')").get() as { n: number }).n;
+  }
+
+  /**
+   * R-05: unfinished asynchronous (unreserved) jobs. Each one holds a
+   * concurrency slot until it reaches a terminal state, so async requests
+   * cannot bypass the concurrency cap. Counted in SQLite, so it holds across
+   * the API and worker processes.
+   */
+  countPendingAsync(): number {
+    return (this.sqlite.prepare("SELECT count(*) AS n FROM jobs WHERE reserved = 0 AND status IN ('QUEUED','RETRYING','RUNNING')").get() as { n: number }).n;
   }
 
   get(id: string): Job {

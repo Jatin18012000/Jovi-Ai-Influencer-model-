@@ -204,6 +204,8 @@ export const jobs = sqliteTable(
     lastError: text('last_error', { mode: 'json' }).$type<Json>(),
     runAfter: text('run_after').notNull(),
     lockedAt: text('locked_at'),
+    /** Reserved = driven synchronously by its creator; unreserved (async) jobs hold a concurrency slot until terminal (R-05). */
+    reserved: integer('reserved', { mode: 'boolean' }).notNull().default(false),
     correlationId: text('correlation_id').notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -230,6 +232,9 @@ export const events = sqliteTable(
     correlationId: text('correlation_id'),
     causationId: text('causation_id'),
     sequence: integer('sequence').notNull(),
+    /** R-08 hash chain: hash = sha256(prevHash ‖ canonical row). Null only for events written before the chain existed. */
+    prevHash: text('prev_hash'),
+    hash: text('hash'),
   },
   (t) => [
     index('events_type_idx').on(t.eventType),

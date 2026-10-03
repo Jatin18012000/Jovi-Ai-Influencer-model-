@@ -1,3 +1,4 @@
+import { statSync } from 'node:fs';
 import type { Logger } from '../config/logger.js';
 import { errorMessage, isRetryable, serializeError } from '../errors.js';
 import type { CorrelationScope } from '../events/event-bus.js';
@@ -16,6 +17,7 @@ import type {
   VoiceGenerationRequest,
 } from '../../media/types.js';
 import type { MediaKind, PrivacyRequirement } from '../../types/enums.js';
+import type { CloudBudget } from '../budget/cloud-budget.js';
 import type { AssetService, MediaAsset } from './asset-service.js';
 
 type Payload<R> = Omit<R, 'assetId' | 'productionId'>;
@@ -62,6 +64,8 @@ export class MediaService {
     private readonly maxAttempts: number,
     /** R-02: refusal reason when a production is not cleared for media generation (null = cleared). */
     private readonly clearance: (productionId: string) => string | null = () => null,
+    /** R-05: media disk quota and the daily cloud budget. */
+    private readonly limits: { quotaBytes?: number; budget?: CloudBudget } = {},
   ) {}
 
   generateImage(job: MediaJob<ImageGenerationRequest>, scope: CorrelationScope) {
@@ -107,7 +111,21 @@ export class MediaService {
       this.logger.warn({ productionId: job.productionId, kind, refusal }, 'media request refused by the safety gate');
       return this.assets.transition(asset.id, 'BLOCKED', { statusReason: refusal }, scope);
     }
-    const requirements: MediaRequirements = { ...(job.requirements ?? {}), ...(job.aspectRatio ? { aspectRatio: job.aspectRatio } : {}) };
+    // R-05: a full media directory stops generation; a spent cloud budget excludes cloud providers.
+    if (this.limits.quotaBytes) {
+      const used = this.store.usageBytes();
+      if (used >= this.limits.quotaBytes) {
+        const reason = `MEDIA_QUOTA_EXCEEDED: media directory uses ${Math.round(used / 1048576)} MB of ${Math.round(this.limits.quotaBytes / 1048576)} MB; run the superseded-media GC or raise JOVI_MEDIA_QUOTA_MB`;
+        this.logger.warn({ productionId: job.productionId, kind, used, quota: this.limits.quotaBytes }, 'media request refused: quota exceeded');
+        return this.assets.transition(asset.id, 'BLOCKED', { statusReason: reason }, scope);
+      }
+    }
+    const cloudBlocked = this.limits.budget?.exhaustedReason() ?? null;
+    const requirements: MediaRequirements = {
+      ...(job.requirements ?? {}),
+      ...(job.aspectRatio ? { aspectRatio: job.aspectRatio } : {}),
+      ...(cloudBlocked ? { cloudBlockedReason: cloudBlocked } : {}),
+    };
     const selection = await this.registry.candidates(kind, requirements, job.preferences ?? {});
     const [primary] = selection.candidates;
     if (!primary) {
@@ -161,6 +179,31 @@ export class MediaService {
     );
   }
 
+  /**
+   * R-05: deletes the files of SUPERSEDED assets older than `olderThanDays`
+   * (records stay for audit, marked purgedAt/purgedBytes). Only files inside
+   * the media directory are touched. `dryRun` reports without deleting.
+   */
+  collectSuperseded(options: { olderThanDays: number; dryRun?: boolean }, scope: CorrelationScope): { assets: number; bytes: number; dryRun: boolean } {
+    const cutoff = new Date(Date.now() - options.olderThanDays * 86_400_000).toISOString();
+    let count = 0;
+    let bytes = 0;
+    for (const asset of this.assets.listByStatus('SUPERSEDED', cutoff)) {
+      const meta = (asset.metadata as { purgedAt?: string } | null) ?? {};
+      if (meta.purgedAt || !asset.location || !this.store.holdsFile(asset.location)) continue;
+      count += 1;
+      if (options.dryRun) {
+        bytes += statSize(asset.location);
+        continue;
+      }
+      const freed = this.store.remove(asset.location);
+      bytes += freed;
+      this.assets.recordPurge(asset.id, freed);
+    }
+    if (!options.dryRun && count > 0) scope.emit('MEDIA_GC_COMPLETED', 'production.media', null, { assets: count, bytes, olderThanDays: options.olderThanDays });
+    return { assets: count, bytes, dryRun: options.dryRun ?? false };
+  }
+
   private providerFields(provider: AnyMediaProvider, request: unknown) {
     return { provider: provider.id, providerKind: provider.kind, model: provider.supportedModels()[0] ?? null, cost: provider.estimateCost(request) };
   }
@@ -211,5 +254,13 @@ export class MediaService {
       metadata: { ...result.metadata, inspection, providerAttempts: history },
     };
     return { done: true, asset: this.assets.transition(asset.id, 'COMPLETED', measured, scope) };
+  }
+}
+
+function statSize(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
   }
 }

@@ -1,0 +1,6 @@
+# osv-scanner configuration (R-07). Every ignore needs a reason and an expiry.
+
+[[IgnoredVulns]]
+id = "GHSA-67mh-4wv8-2f99"
+ignoreUntil = 2027-01-31T00:00:00Z
+reason = "esbuild dev-server CORS issue reached only through drizzle-kit (devDependency, used for `db:generate`). Jovi never runs esbuild's serve mode. Latest stable drizzle-kit 0.31.11 is still affected; npm's only fix is a breaking downgrade to 0.18.1. Re-evaluate when drizzle-kit 1.0 is stable."

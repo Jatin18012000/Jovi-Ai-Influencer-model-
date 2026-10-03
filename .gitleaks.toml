@@ -1,0 +1,16 @@
+# Gitleaks configuration (R-07). Default rules plus a narrow allow-list of
+# known false positives. Each entry is an exact, non-functional value.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Red-team harness canaries: fake values used to prove secrets are never echoed (docs/audit/poc)"
+regexes = [
+  '''canary-anthropic-key-0123456789abcdef''',
+  '''el-canary-0123456789abcdef''',
+  '''canary-token-0123456789(-abcdefghijkl)?''',
+]
+
+[[allowlists]]
+description = "Decision memory keys (decision.<id>) in red-team evidence are identifiers, not secrets"
+regexes = ['''decision\.dec_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}''']

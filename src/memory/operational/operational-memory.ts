@@ -1,7 +1,7 @@
-import { and, desc, eq, gt, isNull, lte, or, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, gt, isNull, like, lte, not, or, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import type { CorrelationScope, EventBus } from '../../core/events/event-bus.js';
-import { ConflictError, NotFoundError, ValidationError } from '../../core/errors.js';
+import { ConflictError, NotFoundError, RateLimitedError, ValidationError } from '../../core/errors.js';
 import { newId, nowIso } from '../../core/ids.js';
 import type { JoviDatabase } from '../../database/client.js';
 import { memoryItems } from '../../database/schema.js';
@@ -84,6 +84,8 @@ export interface MemoryQuery {
   minImportance?: number;
   includeExpired?: boolean;
   limit?: number;
+  /** `internal` = seed/agent memory; `external` = everything else (API). */
+  origin?: 'internal' | 'external';
 }
 
 export interface ScoredMemory extends MemoryItem {
@@ -101,6 +103,8 @@ export class OperationalMemory {
   constructor(
     private readonly db: JoviDatabase,
     private readonly bus: EventBus,
+    /** R-05: total external (API) memory items allowed. */
+    private readonly maxExternalItems = 500,
   ) {}
 
   upsert(input: MemoryInput, scope?: CorrelationScope): { item: MemoryItem; created: boolean } {
@@ -161,6 +165,12 @@ export class OperationalMemory {
     if (existing && existing.source !== EXTERNAL_MEMORY_SOURCE) {
       throw new ConflictError(`memory ${data.type}:${data.key} is owned by ${existing.source} and cannot be overwritten externally`);
     }
+    if (!existing) {
+      const stored = this.db.select({ n: count() }).from(memoryItems).where(eq(memoryItems.source, EXTERNAL_MEMORY_SOURCE)).get()?.n ?? 0;
+      if (stored >= this.maxExternalItems) {
+        throw new RateLimitedError(`external memory is full (${stored} items, max ${this.maxExternalItems}); update or expire existing items`, 60);
+      }
+    }
     return this.upsert(
       {
         ...data,
@@ -196,6 +206,10 @@ export class OperationalMemory {
       if (combined) conditions.push(combined);
     }
     if (query.key) conditions.push(eq(memoryItems.key, query.key));
+    if (query.origin) {
+      const internal = or(like(memoryItems.source, 'seed:%'), like(memoryItems.source, 'agent:%'))!;
+      conditions.push(query.origin === 'internal' ? internal : not(internal));
+    }
     if (query.minImportance !== undefined) conditions.push(gt(memoryItems.importance, query.minImportance - 1e-9));
     if (!query.includeExpired) {
       const notExpired = or(isNull(memoryItems.expiresAt), gt(memoryItems.expiresAt, nowIso()));
@@ -217,7 +231,11 @@ export class OperationalMemory {
    */
   search(text: string, query: MemoryQuery & { limit?: number } = {}): ScoredMemory[] {
     const queryTokens = tokenize(text);
-    const candidates = this.list({ ...query, limit: 500 });
+    // Internal and external candidates are pooled separately, so a flood of
+    // external items can never push seed/agent memory out of the candidate set (R-06).
+    const candidates = query.origin
+      ? this.list({ ...query, limit: 500 })
+      : [...this.list({ ...query, origin: 'internal', limit: 500 }), ...this.list({ ...query, origin: 'external', limit: 500 })];
     const scored = candidates.map((item) => {
       const docTokens = tokenize(`${item.key} ${item.tags.join(' ')} ${JSON.stringify(item.value)}`);
       const relevance = overlapScore(queryTokens, docTokens);

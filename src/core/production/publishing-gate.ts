@@ -14,7 +14,7 @@ export interface PublishingGateResult {
  * It never publishes: there is no publish function, tool, endpoint or
  * production state for publishing in Phase 8.
  */
-export function evaluatePublishingGate(production: Production, allAssets: MediaAsset[]): PublishingGateResult {
+export function evaluatePublishingGate(production: Production, allAssets: MediaAsset[], approvalAttestationBlocker: string | null = null): PublishingGateResult {
   const blockers: string[] = [];
   // Superseded assets were replaced by a human-requested regeneration; they are audit history only.
   const assets = allAssets.filter((a) => a.status !== 'SUPERSEDED');
@@ -22,6 +22,7 @@ export function evaluatePublishingGate(production: Production, allAssets: MediaA
     blockers.push(`QA status is ${production.qaStatus ?? 'not run'}`);
   }
   if (production.status !== 'APPROVED') blockers.push(`production status is ${production.status}; human approval is required`);
+  if (approvalAttestationBlocker) blockers.push(approvalAttestationBlocker);
   if (production.simulated || assets.some((a) => a.simulated)) blockers.push('production contains simulated assets');
   const render = assets.find((a) => a.kind === 'RENDER' && a.status === 'COMPLETED');
   if (!render) blockers.push('no completed final render exists');

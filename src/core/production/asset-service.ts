@@ -1,4 +1,4 @@
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq, lt } from 'drizzle-orm';
 import type { JoviDatabase } from '../../database/client.js';
 import { mediaAssets } from '../../database/schema.js';
 import type { AssetStatus, EventType, MediaKind } from '../../types/enums.js';
@@ -139,6 +139,25 @@ export class AssetService {
   list(productionId: string, kind?: MediaKind): MediaAsset[] {
     const rows = this.db.select().from(mediaAssets).where(eq(mediaAssets.productionId, productionId)).orderBy(asc(mediaAssets.createdAt)).all();
     return kind ? rows.filter((r) => r.kind === kind) : rows;
+  }
+
+  /** Assets in a status whose last change is older than `updatedBefore` (oldest first). */
+  listByStatus(status: AssetStatus, updatedBefore: string): MediaAsset[] {
+    return this.db
+      .select()
+      .from(mediaAssets)
+      .where(and(eq(mediaAssets.status, status), lt(mediaAssets.updatedAt, updatedBefore)))
+      .orderBy(asc(mediaAssets.updatedAt))
+      .all();
+  }
+
+  /** Records that an inactive asset's file was garbage-collected (status and location kept for audit). */
+  recordPurge(id: string, purgedBytes: number): MediaAsset {
+    const asset = this.get(id);
+    if (!INACTIVE_ASSET_STATUSES.includes(asset.status as AssetStatus)) throw new ValidationError(`Asset ${id} is ${asset.status}; only inactive assets can be purged`);
+    const metadata = { ...((asset.metadata as Record<string, unknown> | null) ?? {}), purgedAt: nowIso(), purgedBytes };
+    this.db.update(mediaAssets).set({ metadata }).where(eq(mediaAssets.id, id)).run();
+    return this.get(id);
   }
 
   /** Assets that still count (not rejected or superseded). */

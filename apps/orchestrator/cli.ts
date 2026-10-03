@@ -6,9 +6,9 @@ import { createJoviCore, type JoviCore } from '../../src/core/bootstrap.js';
 import { loadConfig } from '../../src/core/config/config.js';
 import { loadEnvFile } from '../../src/core/config/load-env.js';
 import { createLogger } from '../../src/core/config/logger.js';
+import { newId } from '../../src/core/ids.js';
 import type { GoalExecutionResult } from '../../src/core/orchestrator/orchestrator.js';
 import { VisualIdentityVersionInputSchema } from '../../src/core/identity/visual-identity.js';
-import { newId } from '../../src/core/ids.js';
 import { MediaKind, RoutingTier } from '../../src/types/enums.js';
 
 const USAGE = `Jovi Core v0.1 CLI
@@ -36,6 +36,9 @@ Usage:
   npm run jovi -- --api-token create --name <name> --scopes read,operate[,approve,identity-admin]
                                             Create an API credential (token shown once; only its hash is stored)
   npm run jovi -- --api-token list | --api-token revoke --name <name>
+  npm run jovi -- --audit-verify            Verify the event hash chain; prints the head hash to record elsewhere
+  npm run jovi -- --media-gc [--dry-run] [--older-than-days 7]
+                                            Delete files of SUPERSEDED media older than N days (records are kept)
   npm run jovi -- --simulate ...            SIMULATION: canned mock output + simulated media only
 
 Configuration is read from the environment and .env (see .env.example).
@@ -72,6 +75,10 @@ async function main(): Promise<number> {
       'visual-identity': { type: 'boolean', default: false },
       'set-visual-identity': { type: 'string' },
       summary: { type: 'string' },
+      'audit-verify': { type: 'boolean', default: false },
+      'media-gc': { type: 'boolean', default: false },
+      'dry-run': { type: 'boolean', default: false },
+      'older-than-days': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -93,6 +100,19 @@ async function main(): Promise<number> {
   try {
     if (values['api-token']) return apiTokenCommand(core, values['api-token'], values.name, values.scopes, me.id);
     if (values.providers) return await printProviders(core);
+    if (values['audit-verify']) {
+      const chain = core.events.verifyChain();
+      process.stdout.write(`${JSON.stringify(chain, null, 2)}\n`);
+      if (chain.ok) process.stdout.write(`Audit chain OK. Record this head outside this machine: #${chain.head?.sequence ?? 0} ${chain.head?.hash ?? '(empty)'}\n`);
+      return chain.ok ? 0 : 2;
+    }
+    if (values['media-gc']) {
+      const days = values['older-than-days'] !== undefined ? Number(values['older-than-days']) : core.config.media.supersededRetentionDays;
+      if (!Number.isInteger(days) || days < 0) throw new Error('--older-than-days must be a non-negative integer');
+      const gc = core.media.collectSuperseded({ olderThanDays: days, dryRun: values['dry-run'] }, core.events.scope(newId('correlation')));
+      process.stdout.write(`${gc.dryRun ? 'Would delete' : 'Deleted'} files of ${gc.assets} superseded asset(s), ${(gc.bytes / 1048576).toFixed(1)} MB (older than ${days} day(s)).\n`);
+      return 0;
+    }
     if (values.identity) {
       process.stdout.write(`${JSON.stringify(core.identity.getActive(), null, 2)}\n`);
       return 0;
@@ -110,7 +130,6 @@ async function main(): Promise<number> {
       });
       if (!(await confirm(`record a new visual identity version as ${me.id}`, 'identity', values.yes))) return 1;
       const active = core.visualIdentity.createVersion(input.profile, input.approvedBy, input.changeSummary);
-      core.events.scope(newId('correlation')).emit('VISUAL_IDENTITY_VERSION_CREATED', 'cli', null, { version: active.version, status: active.status, approvedBy: input.approvedBy });
       process.stdout.write(`Visual identity v${active.version} recorded: ${active.status}${active.unlockedFields.length ? ` (unlocked: ${active.unlockedFields.join(', ')})` : ''}\n`);
       return 0;
     }

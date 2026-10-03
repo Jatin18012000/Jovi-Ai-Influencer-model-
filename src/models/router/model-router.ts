@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { CloudBudget } from '../../core/budget/cloud-budget.js';
 import type { Logger } from '../../core/config/logger.js';
 import { InvalidModelOutputError, NoModelAvailableError, ProviderError, errorMessage, isRetryable, serializeError } from '../../core/errors.js';
 import type { CorrelationScope } from '../../core/events/event-bus.js';
@@ -92,7 +93,7 @@ export class ModelRouter {
     private readonly db: JoviDatabase,
     private readonly logger: Logger,
     private readonly prompts: PromptLibrary,
-    private readonly options: { cloudPreference: string[]; allowCloudFallback: boolean },
+    private readonly options: { cloudPreference: string[]; allowCloudFallback: boolean; budget?: CloudBudget },
   ) {}
 
   static tierOf(request: ResolvedRoutingRequest): RoutingTier {
@@ -149,6 +150,14 @@ export class ModelRouter {
           : category === 'HIGH'
             ? 'HIGH tier: cloud model required; LM Studio only as degraded fallback'
             : 'STRATEGIC tier: cloud model plus independent evaluator';
+    }
+    // R-05: once the daily cloud budget is spent, cloud models are not selected (local ones still are).
+    if (candidates.some((c) => c.kind === 'CLOUD')) {
+      const cloudBlocked = this.options.budget?.exhaustedReason() ?? null;
+      if (cloudBlocked) {
+        candidates = candidates.filter((c) => c.kind !== 'CLOUD');
+        reason += ` [${cloudBlocked}]`;
+      }
     }
     reason += ` [latency ${request.latency}]`;
 

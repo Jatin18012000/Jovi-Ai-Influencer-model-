@@ -95,6 +95,16 @@ const EnvSchema = z.object({
   JOVI_ALLOW_NETWORK_BIND: booleanFlag(false),
   JOVI_GOAL_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(10),
   JOVI_MAX_CONCURRENT_GOALS: z.coerce.number().int().positive().default(2),
+  // R-05 resource limits.
+  JOVI_MAX_QUEUED_JOBS: z.coerce.number().int().positive().default(20),
+  JOVI_WRITE_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(30),
+  JOVI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  JOVI_MAX_EXTERNAL_MEMORY_ITEMS: z.coerce.number().int().positive().default(500),
+  JOVI_MAX_MEDIA_REGENERATIONS: z.coerce.number().int().min(0).default(5),
+  JOVI_MEDIA_QUOTA_MB: z.coerce.number().int().positive().default(20_480),
+  JOVI_SUPERSEDED_RETENTION_DAYS: z.coerce.number().int().min(0).default(7),
+  /** Daily cap on estimated cloud spend (model + media). 0 disables cloud providers. */
+  JOVI_DAILY_CLOUD_BUDGET_USD: z.coerce.number().min(0).default(10),
 
   /** Phase 8 media. ComfyUI is optional; unset = image/video providers report NOT_CONFIGURED. */
   COMFYUI_URL: optionalString,
@@ -158,7 +168,12 @@ export type JoviConfig = {
     workerPollMs: number;
     staleMs: number;
     heartbeatMs: number;
+    /** R-05: non-terminal jobs allowed in the queue (enqueue beyond → 429). */
+    maxQueued: number;
   };
+  /** R-05: daily estimated cloud spend cap (USD, UTC day). */
+  budget: { dailyCloudUsd: number };
+  memory: { maxExternalItems: number };
   permissions: { maxLevel: PermissionLevel };
   api: {
     host: string;
@@ -170,6 +185,10 @@ export type JoviConfig = {
     allowNetworkBind: boolean;
     goalRateLimitPerMinute: number;
     maxConcurrentGoals: number;
+    /** R-05: per-principal limit for memory writes, decisions and visual identity changes. */
+    writeRateLimitPerMinute: number;
+    /** R-05: time allowed to receive a whole request (slow-client defence; not a response timeout). */
+    requestTimeoutMs: number;
   };
   media: {
     comfyuiUrl: string | undefined;
@@ -187,6 +206,9 @@ export type JoviConfig = {
     sayPath: string;
     elevenlabs: { apiKey: string | undefined; voiceId: string | undefined; model: string; baseUrl: string };
     voiceTimeoutMs: number;
+    maxRegenerations: number;
+    quotaBytes: number;
+    supersededRetentionDays: number;
   };
   logLevel: z.infer<typeof EnvSchema>['JOVI_LOG_LEVEL'];
   /** Human-readable configuration warnings (e.g. obsolete variables). */
@@ -243,7 +265,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
       workerPollMs: parsed.JOVI_WORKER_POLL_MS,
       staleMs: parsed.JOVI_JOB_STALE_MS,
       heartbeatMs: Math.min(parsed.JOVI_JOB_HEARTBEAT_MS, Math.floor(parsed.JOVI_JOB_STALE_MS / 3)),
+      maxQueued: parsed.JOVI_MAX_QUEUED_JOBS,
     },
+    budget: { dailyCloudUsd: parsed.JOVI_DAILY_CLOUD_BUDGET_USD },
+    memory: { maxExternalItems: parsed.JOVI_MAX_EXTERNAL_MEMORY_ITEMS },
     permissions: { maxLevel: parsed.JOVI_MAX_PERMISSION_LEVEL },
     api: {
       host: parsed.HOST,
@@ -255,6 +280,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
       allowNetworkBind: parsed.JOVI_ALLOW_NETWORK_BIND,
       goalRateLimitPerMinute: parsed.JOVI_GOAL_RATE_LIMIT_PER_MINUTE,
       maxConcurrentGoals: parsed.JOVI_MAX_CONCURRENT_GOALS,
+      writeRateLimitPerMinute: parsed.JOVI_WRITE_RATE_LIMIT_PER_MINUTE,
+      requestTimeoutMs: parsed.JOVI_REQUEST_TIMEOUT_MS,
     },
     media: {
       comfyuiUrl: parsed.COMFYUI_URL,
@@ -274,6 +301,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
       sayPath: parsed.MACOS_SAY_PATH,
       elevenlabs: { apiKey: parsed.ELEVENLABS_API_KEY, voiceId: parsed.ELEVENLABS_VOICE_ID, model: parsed.ELEVENLABS_MODEL, baseUrl: parsed.ELEVENLABS_BASE_URL },
       voiceTimeoutMs: parsed.JOVI_VOICE_TIMEOUT_MS,
+      maxRegenerations: parsed.JOVI_MAX_MEDIA_REGENERATIONS,
+      quotaBytes: parsed.JOVI_MEDIA_QUOTA_MB * 1024 * 1024,
+      supersededRetentionDays: parsed.JOVI_SUPERSEDED_RETENTION_DAYS,
     },
     logLevel: parsed.JOVI_LOG_LEVEL,
     warnings,

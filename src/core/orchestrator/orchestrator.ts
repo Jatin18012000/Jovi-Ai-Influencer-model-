@@ -86,6 +86,7 @@ export class JoviOrchestrator {
 
   async executeGoal(request: GoalRequest): Promise<GoalExecutionResult> {
     const input = GoalRequestSchema.parse(request);
+    this.deps.jobs.assertCapacity('EXECUTIVE_GOAL');
     const correlationId = newId('correlation');
     const scope = this.deps.events.scope(correlationId);
     const logger = this.deps.logger.child({ correlationId });

@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, extname, join, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { ValidationError } from '../core/errors.js';
 import { resolveFromRoot } from '../core/config/paths.js';
 
@@ -50,6 +50,47 @@ export class MediaStore {
   /** True when `path` is a non-empty file inside the media root or the reference directory. */
   isReadableInput(path: string): boolean {
     return MediaStore.isFileWithin(this.root, path) || MediaStore.isFileWithin(this.referenceRoot, resolveFromRoot(path));
+  }
+
+  /** R-05: bytes used under the media root (regular files only; symlinks are not followed). */
+  usageBytes(): number {
+    let total = 0;
+    const walk = (dir: string) => {
+      let entries: string[];
+      try {
+        entries = readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const name of entries) {
+        const path = join(dir, name);
+        const info = lstatSync(path);
+        if (info.isDirectory()) walk(path);
+        else if (info.isFile()) total += info.size;
+      }
+    };
+    walk(this.root);
+    return total;
+  }
+
+  /**
+   * R-05 garbage collection: deletes an asset file and its same-named sidecars
+   * (.srt/.json). Only regular files inside the media root are touched;
+   * symlinks and anything outside the root are refused. Returns bytes freed.
+   */
+  remove(location: string): number {
+    const path = resolve(location);
+    if (!path.startsWith(this.root + sep)) throw new ValidationError('refusing to delete a file outside the media directory');
+    const stem = basename(path, extname(path));
+    let freed = 0;
+    for (const candidate of [path, join(dirname(path), `${stem}.srt`), join(dirname(path), `${stem}.json`)]) {
+      if (!existsSync(candidate)) continue;
+      const info = lstatSync(candidate);
+      if (!info.isFile()) continue;
+      unlinkSync(candidate);
+      freed += info.size;
+    }
+    return freed;
   }
 
   /** Writes a small sidecar file (e.g. captions) next to an asset. */

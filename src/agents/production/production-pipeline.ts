@@ -151,6 +151,7 @@ export class CreativeProductionPipeline {
 
   async start(request: ProductionRequest): Promise<ProductionResult> {
     const input = ProductionRequestSchema.parse(request);
+    this.deps.jobs.assertCapacity(CREATIVE_PRODUCTION_JOB);
     const correlationId = newId('correlation');
 
     let planning: PlanningResult | null = null;
@@ -204,6 +205,7 @@ export class CreativeProductionPipeline {
    */
   async regenerateMedia(productionId: string, request: MediaRegenerationRequest & { mode?: 'sync' | 'async' }): Promise<ProductionResult> {
     const input = MediaRegenerationSchema.parse(request);
+    this.deps.jobs.assertCapacity(CREATIVE_PRODUCTION_JOB);
     const production = this.deps.productions.get(productionId);
     const scope = this.deps.events.scope(production.correlationId);
     const since = nowIso();

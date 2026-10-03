@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { JoviDatabase } from '../../database/client.js';
 import { apiCredentials } from '../../database/schema.js';
 import { ConflictError, NotFoundError, ValidationError } from '../errors.js';
-import type { EventBus } from '../events/event-bus.js';
+import type { EventAttestation, EventBus } from '../events/event-bus.js';
 import { newId, nowIso } from '../ids.js';
 
 /**
@@ -93,6 +93,8 @@ export class ApiCredentialService {
     private readonly db: JoviDatabase,
     private readonly bus: EventBus,
     private readonly envToken: { token: string | undefined; scopes: readonly ApiScope[] },
+    /** R-08: credential events are protected (attested) events. */
+    private readonly attestation?: EventAttestation,
   ) {
     this.envHash = envToken.token ? Buffer.from(hashToken(envToken.token), 'hex') : null;
   }
@@ -106,7 +108,7 @@ export class ApiCredentialService {
     const token = generateToken();
     const id = newId('credential');
     this.db.insert(apiCredentials).values({ id, name: validName, tokenHash: hashToken(token), scopes: validScopes, createdBy }).run();
-    this.bus.emit({ eventType: 'API_CREDENTIAL_CREATED', source: SOURCE, entityId: id, payload: { name: validName, scopes: validScopes, createdBy } });
+    this.bus.emit({ eventType: 'API_CREDENTIAL_CREATED', source: SOURCE, entityId: id, payload: { name: validName, scopes: validScopes, createdBy }, ...this.attested() });
     return { credential: this.summary(id), token };
   }
 
@@ -115,8 +117,12 @@ export class ApiCredentialService {
     if (!row) throw new NotFoundError('ApiCredential', name);
     if (row.revokedAt) throw new ConflictError(`Credential "${name}" is already revoked`);
     this.db.update(apiCredentials).set({ revokedAt: nowIso(), revokedBy }).where(eq(apiCredentials.id, row.id)).run();
-    this.bus.emit({ eventType: 'API_CREDENTIAL_REVOKED', source: SOURCE, entityId: row.id, payload: { name, revokedBy } });
+    this.bus.emit({ eventType: 'API_CREDENTIAL_REVOKED', source: SOURCE, entityId: row.id, payload: { name, revokedBy }, ...this.attested() });
     return this.summary(row.id);
+  }
+
+  private attested() {
+    return this.attestation ? { attestation: this.attestation } : {};
   }
 
   list(): CredentialSummary[] {

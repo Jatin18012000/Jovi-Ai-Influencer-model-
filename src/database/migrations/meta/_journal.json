@@ -29,6 +29,13 @@
       "when": 1791009700194,
       "tag": "0003_api_credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1791011271986,
+      "tag": "0004_audit_chain_and_job_slots",
+      "breakpoints": true
     }
   ]
 }

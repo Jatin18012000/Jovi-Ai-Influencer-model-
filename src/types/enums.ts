@@ -117,6 +117,9 @@ export const EventType = z.enum([
   'API_CREDENTIAL_CREATED',
   'API_CREDENTIAL_REVOKED',
   'SAFETY_REVIEW_COMPLETED',
+  // Security remediation (R-05..R-08)
+  'API_AUTH_FAILED',
+  'MEDIA_GC_COMPLETED',
 ]);
 
 /** Kinds of media a production can require. */

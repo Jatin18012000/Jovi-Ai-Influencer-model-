@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { JoviDatabase } from '../../database/client.js';
 import { visualIdentityVersions } from '../../database/schema.js';
 import { NotFoundError, ValidationError } from '../errors.js';
+import type { EventAttestation, EventBus } from '../events/event-bus.js';
 import { newId, nowIso } from '../ids.js';
 
 /**
@@ -74,6 +75,8 @@ export class VisualIdentityService {
     private readonly identityId = 'jovi',
     /** Validates reference image paths (must be real files in the reference/media directories). */
     private readonly referenceCheck: (path: string) => boolean = () => true,
+    /** R-08: the version event is a protected (attested) audit event emitted here, not by callers. */
+    private readonly audit?: { bus: EventBus; attestation: EventAttestation },
   ) {}
 
   listVersions(): Array<{ version: number; status: 'NOT_LOCKED' | 'LOCKED'; isActive: boolean; approvedBy: string; changeSummary: string; createdAt: string }> {
@@ -149,7 +152,16 @@ export class VisualIdentityService {
         })
         .run();
     });
-    return this.getActive();
+    const active = this.getActive();
+    this.audit?.bus.emit({
+      eventType: 'VISUAL_IDENTITY_VERSION_CREATED',
+      source: 'identity.visual',
+      entityId: this.identityId,
+      payload: { version: active.version, status: active.status, approvedBy, changeSummary },
+      correlationId: newId('correlation'),
+      attestation: this.audit.attestation,
+    });
+    return active;
   }
 }
 

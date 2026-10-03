@@ -2,11 +2,13 @@
  * JOVI CREATOR OS — SAFE RED-TEAM HARNESS (audit evidence, not a test suite)
  *
  *   npx tsx docs/audit/poc/redteam.mts            # prints a JSON report
- *   npx tsx docs/audit/poc/redteam.mts --write     # also writes docs/audit/poc/redteam-results-after-p0.json
+ *   npx tsx docs/audit/poc/redteam.mts --write     # also writes docs/audit/poc/redteam-results-after-p1.json
  *
  * Updated after the P0 remediations (R-01..R-04): legitimate calls use scoped
  * credentials; attacks stay unauthenticated, spoofed or under-scoped. The
- * original audit run (commit 43725c5) is kept in redteam-results.json.
+ * original audit run (commit 43725c5) is kept in redteam-results.json, the
+ * P0 re-run (commit 35802ca) in redteam-results-after-p0.json. Updated again
+ * after the P1 remediations (R-05..R-08).
  *
  * Safety: in-memory SQLite, temporary directories under the OS temp dir,
  * an API server bound to 127.0.0.1 on an ephemeral port, deterministic mock /
@@ -153,6 +155,7 @@ async function main() {
     }
     const ctx = await c.contextEngine.build({ goal, task: { id: null, type: 'probe' }, agent: { name: 'executive', allowedTools: [], permissionLevel: 'LEVEL_2_MODIFY' } });
     const untrusted = ctx.memory.filter((m) => m.trust === 'untrusted').length;
+    const trustedInContext = ctx.memory.filter((m) => m.trust === 'trusted').length;
     const rendered = c.contextEngine.render(ctx);
     record('RT-02a', 'API cannot write IDENTITY memory or overwrite seed/agent memory', identityType.statusCode === 400 && overwriteSeed.statusCode === 409 ? 'HELD' : 'VULNERABLE', {
       identityTypeStatus: identityType.statusCode,
@@ -162,12 +165,13 @@ async function main() {
       cappedConfidence: highImportance.json().item?.confidence,
       forcedSource: highImportance.json().item?.source,
     });
-    record('RT-02b', 'Untrusted API memory can flood the bounded memory context (displacing trusted memory)', untrusted >= ctx.memory.length / 2 ? 'VULNERABLE' : 'HELD', {
+    record('RT-02b', 'Keyword-stuffed API memory takes at most 2 context slots and cannot displace trusted memory', untrusted > 2 || trustedInContext === 0 ? 'VULNERABLE' : 'HELD', {
       memorySlots: ctx.memory.length,
       untrustedInContext: untrusted,
+      trustedInContext,
+      floodItemsWritten: 12,
       labelledUntrusted: rendered.includes('untrusted, source=api'),
       insideDataTags: /<memory_data>[\s\S]*untrusted, source=api[\s\S]*<\/memory_data>/.test(rendered),
-      noRateLimitOnMemoryWrites: true,
     });
     await app.close();
     await c.close();
@@ -276,7 +280,7 @@ async function main() {
     c.database.sqlite.prepare("UPDATE productions SET status='APPROVED', approved_by='nobody' WHERE id=?").run(prod2.productionId);
     const gate2 = c.productions.publishingGate(prod2.productionId!);
     const approvalEvents = c.events.list({ correlationId: prod2.correlationId, eventType: 'PRODUCTION_APPROVED', limit: 5 }).length;
-    record('RT-05c', 'Direct SQLite mutation forges approval; no integrity check reconciles state with the event log', gate2.eligibleForHumanPublishing ? 'VULNERABLE' : 'HELD', {
+    record('RT-05c', 'A SQL-forged approval (status edited without an attested event) is refused by the publishing gate', gate2.eligibleForHumanPublishing || !gate2.blockers.some((b) => /approval not attested/.test(b)) ? 'VULNERABLE' : 'HELD', {
       gateAfterSqlUpdate: gate2,
       approvalEventsRecorded: approvalEvents,
       precondition: 'write access to the SQLite file (local compromise)',
@@ -547,12 +551,20 @@ async function main() {
     for (let i = 0; i < 8; i += 1) codes.push((await app.inject({ method: 'POST', url: '/api/productions', headers, payload: { idea: DIRECT_IDEA, mode: 'async' } })).statusCode);
     const queued = (c.database.sqlite.prepare("SELECT count(*) AS n FROM jobs WHERE status IN ('QUEUED','RETRYING')").get() as { n: number }).n;
     let memoryWrites = 0;
-    for (let i = 0; i < 300; i += 1) if ((await app.inject({ method: 'POST', url: '/api/memory', headers, payload: { type: 'TEMPORARY', key: `spam.${i}`, value: 'x'.repeat(4000) } })).statusCode === 201) memoryWrites += 1;
-    record('RT-14', 'Async productions are rate-limited but not concurrency-capped; queue and memory writes are unbounded', queued > 2 ? 'VULNERABLE' : 'HELD', {
+    const memoryCodes = new Map<number, number>();
+    for (let i = 0; i < 300; i += 1) {
+      const status = (await app.inject({ method: 'POST', url: '/api/memory', headers, payload: { type: 'TEMPORARY', key: `spam.${i}`, value: 'x'.repeat(4000) } })).statusCode;
+      memoryCodes.set(status, (memoryCodes.get(status) ?? 0) + 1);
+      if (status === 201) memoryWrites += 1;
+    }
+    record('RT-14', 'Async jobs hold concurrency slots (429 beyond the cap); the queue is capped; memory writes are rate limited', queued > 2 || memoryWrites > c.config.api.writeRateLimitPerMinute ? 'VULNERABLE' : 'HELD', {
       asyncStatusCodes: codes,
-      jobsQueuedBeyondConcurrencyCap: queued,
-      unthrottledMemoryWritesOf4KB: memoryWrites,
-      note: 'Per-IP 10/min rate limit still applied (requests 11+ would get 429). Each queued production can take ~18 min of local inference.',
+      jobsQueued: queued,
+      maxConcurrent: 2,
+      queueCap: c.config.jobs.maxQueued,
+      memoryWritesOf4KBAccepted: memoryWrites,
+      memoryWriteStatusCodes: Object.fromEntries(memoryCodes),
+      otherLimits: { requestTimeoutMs: c.config.api.requestTimeoutMs, maxRegenerationsPerProduction: c.config.media.maxRegenerations, mediaQuotaMb: c.config.media.quotaBytes / 1048576, dailyCloudBudgetUsd: c.config.budget.dailyCloudUsd },
     });
     await app.close();
     await c.close();
@@ -605,13 +617,31 @@ async function main() {
   {
     const c = await core({ JOVI_SIMULATION_MODE: 'true', JOVI_WORKER_ENABLED: 'false' });
     const scope = c.events.scope(newId('correlation'));
-    scope.emit('PRODUCTION_APPROVED', 'agents.script', 'prd_forged', { reviewer: 'nobody' });
+    let forgeAttempt = 'ALLOWED';
+    try {
+      scope.emit('PRODUCTION_APPROVED', 'agents.script', 'prd_forged', { reviewer: 'nobody' });
+    } catch (e) {
+      forgeAttempt = (e as Error).name;
+    }
     const forged = c.events.list({ eventType: 'PRODUCTION_APPROVED', limit: 5 }).length;
     const started = await c.production.start({ idea: DIRECT_IDEA, mode: 'async' });
     const jobId = started.jobId!;
     const settled = await Promise.allSettled([c.jobs.run(jobId), c.jobs.run(jobId)]);
     const agentRuns = (c.database.sqlite.prepare('SELECT count(*) AS n FROM agent_runs WHERE task_id = ? AND agent_id = ?').get(started.taskId, 'script') as { n: number }).n;
-    record('RT-17a', 'Any in-process component can emit any event type (event log is not tamper-evident)', forged > 0 ? 'VULNERABLE' : 'HELD', { forgedApprovalEventsStored: forged, apiEventWriteRoute: false });
+    // Tamper evidence: edit one stored event and verify the chain.
+    const before = c.events.verifyChain();
+    const victim = c.database.sqlite.prepare('SELECT id, sequence FROM events ORDER BY sequence LIMIT 1 OFFSET 2').get() as { id: string; sequence: number };
+    c.database.sqlite.prepare("UPDATE events SET source = 'tampered' WHERE id = ?").run(victim.id);
+    const after = c.events.verifyChain();
+    record('RT-17a', 'Protected events (approvals, identity, credentials) cannot be forged in-process; edits to the event log are detected', forged > 0 || after.ok ? 'VULNERABLE' : 'HELD', {
+      forgeAttempt,
+      forgedApprovalEventsStored: forged,
+      apiEventWriteRoute: false,
+      chainBeforeTamper: { ok: before.ok, checked: before.checked },
+      chainAfterTamper: { ok: after.ok, firstBreak: after.firstBreak },
+      tamperedSequence: victim.sequence,
+      residualRisk: 'a local attacker with database write access can append a fully re-hashed forgery at the tail; record the chain head (npm run jovi -- --audit-verify) outside the machine to detect it',
+    });
     record('RT-17b', 'Concurrent runs of the same job execute once (job claim/lock)', agentRuns === 1 ? 'HELD' : 'VULNERABLE', { scriptAgentRuns: agentRuns, outcomes: settled.map((s) => (s.status === 'fulfilled' ? `ran: ${s.value.status}` : `refused: ${(s.reason as Error).message.slice(0, 60)}`)) });
     await c.close();
   }
@@ -693,5 +723,5 @@ main()
     const report = { generatedAt: new Date().toISOString(), node: process.version, summary, results };
     const text = JSON.stringify(report, null, 2);
     process.stdout.write(`${text}\n`);
-    if (process.argv.includes('--write')) writeFileSync(new URL('./redteam-results-after-p0.json', import.meta.url), `${text}\n`);
+    if (process.argv.includes('--write')) writeFileSync(new URL('./redteam-results-after-p1.json', import.meta.url), `${text}\n`);
   });

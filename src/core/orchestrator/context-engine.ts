@@ -1,5 +1,5 @@
 import type { KnowledgeBase, KnowledgeMatch } from '../../memory/knowledge/knowledge-base.js';
-import { memoryTrust, type MemoryTrust, type OperationalMemory } from '../../memory/operational/operational-memory.js';
+import { memoryTrust, type MemoryTrust, type OperationalMemory, type ScoredMemory } from '../../memory/operational/operational-memory.js';
 import type { SemanticMemory } from '../../memory/semantic/semantic-memory.js';
 import { truncate } from '../../memory/text.js';
 import type { ProviderRegistry } from '../../models/providers/provider-registry.js';
@@ -17,6 +17,12 @@ export interface ContextLimits {
   knowledgeSections: number;
   recentDecisions: number;
   similarConcepts: number;
+  /** R-06: memory below this keyword relevance (share of goal terms matched) is never included. */
+  minMemoryRelevance: number;
+  /** R-06: slots reserved for trusted (seed) memory when relevant trusted items exist. */
+  reservedTrustedSlots: number;
+  /** R-06: maximum untrusted (API) items in one context. */
+  maxUntrustedItems: number;
 }
 
 export const DEFAULT_CONTEXT_LIMITS: ContextLimits = {
@@ -24,7 +30,34 @@ export const DEFAULT_CONTEXT_LIMITS: ContextLimits = {
   knowledgeSections: 4,
   recentDecisions: 5,
   similarConcepts: 3,
+  minMemoryRelevance: 0.08,
+  reservedTrustedSlots: 6,
+  maxUntrustedItems: 2,
 };
+
+/**
+ * Security remediation R-06: chooses the memory slice for a context.
+ *  - items below the relevance floor are dropped (keyword stuffing aside,
+ *    unrelated items never take a slot);
+ *  - up to `reservedTrustedSlots` go to trusted (seed) items first;
+ *  - untrusted (API) items are capped at `maxUntrustedItems`;
+ *  - remaining slots go to the best-scoring rest (trusted, derived, untrusted within the cap).
+ */
+export function selectContextMemory(pool: readonly ScoredMemory[], limits: Pick<ContextLimits, 'memoryItems' | 'minMemoryRelevance' | 'reservedTrustedSlots' | 'maxUntrustedItems'>): ScoredMemory[] {
+  const relevant = [...pool].filter((m) => m.relevance >= limits.minMemoryRelevance).sort((a, b) => b.score - a.score);
+  const picked = relevant.filter((m) => memoryTrust(m.source) === 'trusted').slice(0, Math.min(limits.reservedTrustedSlots, limits.memoryItems));
+  let untrusted = 0;
+  for (const m of relevant) {
+    if (picked.length >= limits.memoryItems) break;
+    if (picked.includes(m)) continue;
+    if (memoryTrust(m.source) === 'untrusted') {
+      if (untrusted >= limits.maxUntrustedItems) continue;
+      untrusted += 1;
+    }
+    picked.push(m);
+  }
+  return picked.sort((a, b) => b.score - a.score);
+}
 
 export interface ContextRequest {
   goal: string;
@@ -108,11 +141,13 @@ export class ContextEngine {
     const identity = this.deps.identity.getActive();
     const strategy = this.deps.strategy.getActive();
 
-    const memory = this.deps.memory
-      .search(request.goal, {
-        limit: limits.memoryItems,
-        ...(request.memoryTypes ? { types: request.memoryTypes } : {}),
-      })
+    const types = request.memoryTypes ? { types: request.memoryTypes } : {};
+    // Internal and external pools are retrieved separately so external items cannot crowd out curated memory.
+    const pool = [
+      ...this.deps.memory.search(request.goal, { ...types, origin: 'internal', limit: limits.memoryItems * 3 }),
+      ...this.deps.memory.search(request.goal, { ...types, origin: 'external', limit: limits.memoryItems }),
+    ];
+    const memory = selectContextMemory(pool, limits)
       .map((m) => ({
         type: m.type,
         key: m.key,
