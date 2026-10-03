@@ -6,8 +6,9 @@ Security remediation R-07 (audit F-07) has two parts:
 - **Repository settings:** only the owner can change these. They are listed below.
 
 State on 2026-10-03:
-- The repository has one branch, `claude/busy-pascal-h6hvhh`. It is unprotected, and there is no `main`.
-- Dependabot only runs against the **default branch**, so it starts working once `main` exists and is the default.
+- The repository has one branch, `claude/busy-pascal-h6hvhh`. It is unprotected and is currently the default branch; there is no `main`.
+- CI run #1 on that branch passed.
+- Dependabot runs against the default branch, so it is already active there. Its update pull requests will target `main` once `main` is the default.
 
 ## 1. Create `main` from a reviewed commit
 
