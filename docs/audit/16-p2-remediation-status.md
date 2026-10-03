@@ -1,6 +1,6 @@
 # 16 — P2 Remediation Status (R-09 … R-19)
 
-Follow-up to `15-p1-remediation-status.md`. Branch `claude/busy-pascal-h6hvhh`, 2026-10-03.
+Follow-up to `15-p1-remediation-status.md`. Branch `claude/busy-pascal-h6hvhh`, code commit `09ba05e` (CI green, including the container job), 2026-10-03.
 
 Evidence:
 - **Regression tests:** `tests/integration/p2-hardening.test.ts` (16 tests, covering R-09 … R-13 and R-15 … R-18).
@@ -86,7 +86,16 @@ Every check in the harness now holds. The harness covers the attacks it was writ
 
 ## CI status
 
-Recorded after the push in the final report for this change.
+The push of `09ba05e` ran CI as [run 37108326196](https://github.com/Jatin18012000/Jovi-Ai-Influencer-model-/actions/runs/37108326196): **success**, all four jobs green.
+
+| Job | Result | Evidence |
+|---|---|---|
+| Typecheck, test, build | success | 289 passed, 9 skipped |
+| Dependency audit + SBOM | success | 0 runtime advisories; osv-scanner found no issues beyond the one documented ignore; SBOM uploaded |
+| Secret scan (gitleaks, full history) | success | No leaks |
+| **Container (hardened compose)** — new | success | The image built from the digest-pinned base, and `/health` answered. `docker inspect`: `readonly=true capdrop=[ALL] secopt=[no-new-privileges:true] memory=2147483648 pids=256 user=node`. A write to `/app` was refused; `/app/data` is writable; `/app/data` is `700` and `jovi.db` is `600`; `/api/status` without a token → 401; a foreign Host → 403; the owner credential was created on first start |
+
+This is the first time the Docker image has been built and run in this project's history, and it passed. R-14 is therefore verified on a real container, not only in configuration.
 
 ## Not done
 
