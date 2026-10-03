@@ -9,6 +9,7 @@ This round closes every item that can be closed in code. What remains needs the 
 - an independent human review.
 
 Evidence:
+- **CI:** run 37142937107 on `dac84a8`, all four jobs green (typecheck/test/build, dependency audit + SBOM with osv-scanner, gitleaks full history, hardened container).
 - **Regression tests:** `tests/integration/final-remediation.test.ts` (14 tests), plus the ElevenLabs estimate in `media-providers-fake.test.ts`.
 - **Re-audit probes:** `reaudit-probe-results-final.json`, with 14 HELD and 1 INFO. New probes RA-12 … RA-15; RA-09 and RA-10 are now pass/fail.
 - **Original harness:** `redteam-results-final.json`, 27/27 HELD.
@@ -53,8 +54,8 @@ Evidence:
 | Item | Why not in code | What closes it |
 |---|---|---|
 | **R2-04, the real-model measurement** | The gate exists and is enforced. The *number* needs the owner's LM Studio model, and this environment has no local model (no automatic downloads) | Run `npm run jovi -- --safety-eval` (runbook §7) and commit the result. Until it passes, real productions stay BLOCKED: **safe by default** |
-| **R2-08, protected `main`** | Repository settings are owner actions. Creating `main` means pushing a branch other than this one | Runbook §1–§3 |
+| **R2-08, protected `main`** | `main` was created at `dac84a8` with the owner's approval. Making it the default branch and protecting it was refused by this session's GitHub proxy (HTTP 403: repository-settings writes are not permitted) | Owner: *Settings → General → Default branch → main*, then runbook §2–§3 |
 | D-22, the ComfyUI identity workflow | It lives on the owner's machine; committing an untested sample would be a fake integration | `workflows/README.md` |
 | Independent human review | Must not be the system that wrote the code (F-24) | Before Phase 10 |
-| Dependabot PRs #1 and #3 | Major runtime upgrades (Node 26 image, better-sqlite3 13). Both are green, but they need an owner decision; PR #2 is superseded by this branch | Owner review |
+| Dependabot PRs #1 and #3 | Major runtime upgrades (Node 26 image, better-sqlite3 13). Both are green, but they need an owner decision. PR #2 was closed as superseded (comment explains the root cause) | Owner review |
 | Residual, accepted | A local user who can write the media directory before Jovi first hashes a file; calibration covers the corpus, not every phrasing | Human approval remains the final control; grow the corpus with every real miss |

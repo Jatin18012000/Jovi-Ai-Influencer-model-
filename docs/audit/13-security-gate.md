@@ -22,7 +22,7 @@ Evidence:
 | **I** | **PASS** | Unchanged |
 | **J** | **CONDITIONAL PASS** | **Structurally closed:** no real reviewer can clear media until it has been measured on the labelled corpus (RA-12); negative prompts are code-only (RA-01); anchors are reviewed (RA-02). *Condition:* the owner's measurement run (R2-04). Until it passes, real productions stop BLOCKED, so the system is **safe by default** but not yet usable for real media |
 | **K** | **PASS** | Calibration records are protected, chained events. N-10 closed (`#private` capability, RA-10) |
-| **L** | **CONDITIONAL PASS** | Controls work (CI with 4 jobs). *Condition:* the repository is public, with no protected branch (R2-08, owner) |
+| **L** | **CONDITIONAL PASS** | Controls work (CI with 4 jobs). `main` now exists at `dac84a8`. *Condition:* make it the default branch and protect it (R2-08, owner: this session's GitHub proxy refuses repository-settings writes) |
 
 **Overall gate verdict: CONDITIONAL PASS.** Every condition left is an owner action:
 1. **R2-04:** `npm run jovi -- --safety-eval` passes on the owner's reviewer model (J). Until then real media generation is blocked by design.
@@ -41,7 +41,7 @@ Evidence:
 | After P2 (`16`) | `09ba05e` | CONDITIONAL PASS | — |
 | Re-audit (v2) | `3318a43` | FAIL | J (new evidence: N-01, N-04) |
 | Re-audit remediation (R2) (`v2/06`) | `7a57d1c` | CONDITIONAL PASS | — (J conditional on R2-04) |
-| **Final remediation** (`v2/07`) | this commit | **CONDITIONAL PASS** | — (J and L conditional on owner steps; C passes) |
+| **Final remediation** (`v2/07`) | `dac84a8` (CI run 37142937107: 4/4 green) | **CONDITIONAL PASS** | — (J and L conditional on owner steps; C passes) |
 
 ---
 
