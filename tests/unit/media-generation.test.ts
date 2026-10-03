@@ -17,7 +17,7 @@ import { GoogleFlowVideoProvider } from '../../src/media/providers/unintegrated-
 import { parseSayVoices } from '../../src/media/providers/voice-providers.js';
 import { capabilityMismatch, type MediaCapabilities } from '../../src/media/types.js';
 import { mp4Bytes, pngBytes, TestImageProvider, TestVideoProvider, TestVoiceProvider, wavBytes } from '../fakes/fake-media.js';
-import { createTestCore } from '../helpers.js';
+import { clearForMedia, createTestCore } from '../helpers.js';
 
 /** DETERMINISTIC unit tests for the Phase 9 media layer (no network, no binaries except `node`). */
 
@@ -258,6 +258,7 @@ describe('MediaService: fallback, verification and measurement', () => {
       { taskId: task.id, sourceType: 'DIRECT', sourcePlanningTaskId: null, ideaId: 'idea-1', idea: {}, productionContext: {}, identityVersion: 1, visualIdentityVersion: 1, simulated: false },
       scope,
     );
+    clearForMedia(core, p.id);
     return { productionId: p.id, scope };
   }
   const imageJob = (productionId: string) => ({

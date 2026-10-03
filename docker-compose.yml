@@ -17,9 +17,12 @@ services:
       PORT: 3000
       DATABASE_URL: data/jovi.db
       LM_STUDIO_URL: ${LM_STUDIO_URL_DOCKER:-http://host.docker.internal:1234/v1}
-      # The API binds 0.0.0.0 inside the container, but the published port below is
-      # loopback-only. Set JOVI_API_TOKEN (in .env) before publishing it more widely.
-      JOVI_ALLOW_UNAUTHENTICATED_NETWORK: "true"
+      # The API binds 0.0.0.0 inside the container; the published port below is
+      # loopback-only. Authentication is always required: on first start the API
+      # prints an owner token once (see `docker compose logs jovi-core`), or set a
+      # ≥32-char JOVI_API_TOKEN in .env. Other containers must be added to
+      # JOVI_ALLOWED_HOSTS (by service name) to be answered at all.
+      JOVI_ALLOW_NETWORK_BIND: "true"
     extra_hosts:
       - host.docker.internal:host-gateway
     ports:

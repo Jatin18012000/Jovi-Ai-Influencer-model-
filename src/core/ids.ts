@@ -17,6 +17,7 @@ export const IdPrefix = {
   production: 'prd',
   artifact: 'art',
   asset: 'ast',
+  credential: 'crd',
 } as const;
 
 export type IdKind = keyof typeof IdPrefix;

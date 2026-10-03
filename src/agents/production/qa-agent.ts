@@ -101,6 +101,7 @@ export class QAAgent implements Agent<QAAgentInput, QAReport, null> {
       assets,
       modelReview,
       ...(modelReviewError ? { modelReviewError } : {}),
+      safetyReview: ctx.tools.production.getArtifact<{ verdict: string; reasons: string[] }>(input.productionId, 'SAFETY_REVIEW'),
     });
   }
 

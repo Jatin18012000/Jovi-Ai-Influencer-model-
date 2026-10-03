@@ -269,7 +269,9 @@ describe('identity guard (structural, applied at parse time)', () => {
 
   it('detects age, minor depiction, origin, AI-transparency, explicit and likeness violations', () => {
     const rules = (text: string, likeness = false) => findIdentityViolations([text], identity, { likeness }).map((v) => v.rule);
-    expect(rules("I'm 19 and loving it")).toContain('AGE');
+    expect(rules("I'm 31 and loving it")).toContain('AGE');
+    // Ages under 21 are treated as minor depiction (stricter than a plain age mismatch).
+    expect(rules("I'm 19 and loving it")).toContain('MINOR_DEPICTION');
     expect(rules('a teenage schoolgirl look')).toContain('MINOR_DEPICTION');
     expect(rules("I'm from Paris")).toContain('ORIGIN');
     expect(rules("Honestly I'm a real person")).toContain('AI_TRANSPARENCY');
@@ -392,7 +394,11 @@ describe('governance contracts', () => {
       if (from !== 'AWAITING_HUMAN_APPROVAL') expect(targets, from).not.toContain('APPROVED');
     }
     // BLOCKED can only be rejected or sent back to media regeneration — both human-only actions.
-    expect(PRODUCTION_TRANSITIONS.BLOCKED).toEqual(['REJECTED', 'GENERATING_ASSETS']);
+    expect(PRODUCTION_TRANSITIONS.BLOCKED).toEqual(['REJECTED', 'SAFETY_REVIEW']);
+    // R-02: media generation is only reachable through the safety review.
+    for (const [from, targets] of Object.entries(PRODUCTION_TRANSITIONS)) {
+      if (from !== 'SAFETY_REVIEW') expect(targets, from).not.toContain('GENERATING_ASSETS');
+    }
   });
 
   it('pipeline code cannot set APPROVED/REJECTED; approval needs a passing QA verdict', () => {
@@ -403,7 +409,7 @@ describe('governance contracts', () => {
       scope,
     );
     expect(() => core.productions.advance(p.id, 'APPROVED', scope)).toThrow(/human decision/);
-    for (const s of ['SCRIPTING', 'STORYBOARDING', 'PROMPTING', 'GENERATING_ASSETS', 'EDITING', 'QA'] as const) core.productions.advance(p.id, s, scope);
+    for (const s of ['SCRIPTING', 'STORYBOARDING', 'PROMPTING', 'SAFETY_REVIEW', 'GENERATING_ASSETS', 'EDITING', 'QA'] as const) core.productions.advance(p.id, s, scope);
     // QA not yet reported: cannot reach approval; an explicit FAIL report blocks approval.
     core.productions.saveArtifact(p.id, 'QA_REPORT', { status: 'FAIL' }, null, scope);
     core.productions.advance(p.id, 'BLOCKED', scope);

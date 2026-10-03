@@ -18,19 +18,21 @@ const SOURCE = 'production';
  * Production lifecycle. Agents/pipeline can only move a production forward to
  * the human approval boundary. APPROVED/REJECTED are reachable only through
  * `recordHumanDecision`, and there is no PUBLISHED state. Leaving BLOCKED or
- * AWAITING_HUMAN_APPROVAL back to GENERATING_ASSETS (media regeneration) is
- * only possible through `requestMediaRegeneration`, a human/operator action.
+ * AWAITING_HUMAN_APPROVAL back to SAFETY_REVIEW (media regeneration) is only
+ * possible through `requestMediaRegeneration`, a human/operator action.
  */
 export const PRODUCTION_TRANSITIONS: Record<ProductionStatus, ProductionStatus[]> = {
   CREATED: ['SCRIPTING', 'FAILED'],
   SCRIPTING: ['STORYBOARDING', 'FAILED'],
   STORYBOARDING: ['PROMPTING', 'FAILED'],
-  PROMPTING: ['GENERATING_ASSETS', 'FAILED'],
+  PROMPTING: ['SAFETY_REVIEW', 'FAILED'],
+  // R-02: no media is requested until the pre-generation safety review allows it.
+  SAFETY_REVIEW: ['GENERATING_ASSETS', 'BLOCKED', 'FAILED'],
   GENERATING_ASSETS: ['EDITING', 'FAILED'],
   EDITING: ['QA', 'FAILED'],
   QA: ['AWAITING_HUMAN_APPROVAL', 'BLOCKED', 'FAILED'],
-  AWAITING_HUMAN_APPROVAL: ['APPROVED', 'REJECTED', 'GENERATING_ASSETS'],
-  BLOCKED: ['REJECTED', 'GENERATING_ASSETS'],
+  AWAITING_HUMAN_APPROVAL: ['APPROVED', 'REJECTED', 'SAFETY_REVIEW'],
+  BLOCKED: ['REJECTED', 'SAFETY_REVIEW'],
   APPROVED: [],
   REJECTED: [],
   FAILED: [],
@@ -44,6 +46,7 @@ const ARTIFACT_EVENT: Record<ArtifactKind, EventType> = {
   SCRIPT: 'SCRIPT_CREATED',
   STORYBOARD: 'STORYBOARD_CREATED',
   VISUAL_PROMPTS: 'VISUAL_PROMPT_CREATED',
+  SAFETY_REVIEW: 'SAFETY_REVIEW_COMPLETED',
   EDIT_PLAN: 'EDITING_PLAN_CREATED',
   QA_REPORT: 'QA_COMPLETED',
 };
@@ -138,6 +141,7 @@ export class ProductionService {
     const row = { id: newId('artifact'), productionId, kind, version: (latest?.version ?? 0) + 1, content, agentRunId, createdAt: nowIso() };
     this.db.insert(productionArtifacts).values(row).run();
     const payload: Record<string, unknown> = { productionId, version: row.version, agentRunId };
+    if (kind === 'SAFETY_REVIEW') payload.verdict = (content as { verdict?: string }).verdict ?? null;
     if (kind === 'QA_REPORT') {
       const status = (content as { status?: QAStatus }).status ?? null;
       payload.status = status;
@@ -145,6 +149,21 @@ export class ProductionService {
     }
     scope.emit(ARTIFACT_EVENT[kind], SOURCE, row.id, payload);
     return row;
+  }
+
+  /**
+   * R-02: media may be generated for a production only with a current ALLOW
+   * safety review (newer than the visual prompts it reviewed). Returns the
+   * refusal reason, or null when cleared.
+   */
+  safetyClearance(productionId: string): string | null {
+    const review = this.latestArtifact<{ verdict?: string; reasons?: string[] }>(productionId, 'SAFETY_REVIEW');
+    if (!review) return 'SAFETY_REVIEW_REQUIRED: no pre-generation safety review exists for this production';
+    if (review.verdict !== 'ALLOW') return `SAFETY_REVIEW_BLOCKED: ${(review.reasons ?? []).join('; ').slice(0, 300)}`;
+    const reviewedAt = this.artifactCreatedAt(productionId, 'SAFETY_REVIEW');
+    const promptsAt = this.artifactCreatedAt(productionId, 'VISUAL_PROMPTS');
+    if (promptsAt && reviewedAt && promptsAt > reviewedAt) return 'SAFETY_REVIEW_STALE: the visual prompts changed after the last review';
+    return null;
   }
 
   /** When the latest artifact of a kind was stored (null if none). */
@@ -225,7 +244,8 @@ export class ProductionService {
       superseded.push(asset.id);
     }
     scope.emit('MEDIA_REGENERATION_REQUESTED', SOURCE, id, { requestedBy: request.requestedBy, reason: request.reason ?? null, kinds, includeCompleted: request.includeCompleted, superseded });
-    return this.transition(id, 'GENERATING_ASSETS', scope, { qaStatus: null, error: null });
+    // Regeneration re-enters through the safety gate (R-02): media is never requested without a fresh review.
+    return this.transition(id, 'SAFETY_REVIEW', scope, { qaStatus: null, error: null });
   }
 
   publishingGate(id: string): PublishingGateResult {

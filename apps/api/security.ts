@@ -10,22 +10,59 @@ export function isLoopbackHost(host: string): boolean {
 }
 
 /**
- * Refuses to expose the API beyond this machine without authentication.
- * Returns a warning string when the escape hatch is used.
+ * Binding beyond loopback is refused unless explicitly allowed
+ * (JOVI_ALLOW_NETWORK_BIND, e.g. inside a container whose published port is
+ * loopback-only). Authentication is mandatory either way; this guard keeps
+ * plain-HTTP bearer tokens off the network by default.
  */
 export function assertSafeBind(config: JoviConfig['api']): string | null {
-  if (isLoopbackHost(config.host) || config.token) return null;
-  if (config.allowUnauthenticatedNetwork) {
-    return `API bound to ${config.host} without JOVI_API_TOKEN (JOVI_ALLOW_UNAUTHENTICATED_NETWORK=true). Only safe if the published port is loopback-only.`;
+  if (isLoopbackHost(config.host)) return null;
+  if (config.allowNetworkBind) {
+    return `API bound to ${config.host} (JOVI_ALLOW_NETWORK_BIND=true). Authentication is enforced, but traffic is plain HTTP: keep the published port loopback-only or put a TLS proxy in front.`;
   }
   throw new Error(
-    `Refusing to start: HOST=${config.host} is reachable from the network but JOVI_API_TOKEN is not set. ` +
-      'Set JOVI_API_TOKEN, bind HOST=127.0.0.1, or (containers with a loopback-only published port) set JOVI_ALLOW_UNAUTHENTICATED_NETWORK=true.',
+    `Refusing to start: HOST=${config.host} is reachable from the network. Bind HOST=127.0.0.1, or set JOVI_ALLOW_NETWORK_BIND=true (containers / behind a TLS proxy).`,
   );
 }
 
+/** Hostname of a Host header value without the port ("[::1]:3000" → "::1"). */
+export function hostnameOf(hostHeader: string | undefined): string | null {
+  if (!hostHeader) return null;
+  const value = hostHeader.trim().toLowerCase();
+  if (value.startsWith('[')) {
+    const end = value.indexOf(']');
+    return end > 0 ? value.slice(1, end) : null;
+  }
+  const colon = value.lastIndexOf(':');
+  return colon > -1 && value.indexOf(':') === colon ? value.slice(0, colon) : value;
+}
+
 /**
- * Guards expensive endpoints (goal execution, evaluation): a per-client
+ * DNS-rebinding and cross-site defence: the Host header must name an allowed
+ * host, and a browser Origin (when present) must be an allowed host or an
+ * explicitly allowed origin. Returns a refusal reason, or null when allowed.
+ */
+export function checkHostAndOrigin(
+  headers: { host?: string | undefined; origin?: string | undefined },
+  allowedHosts: readonly string[],
+  allowedOrigins: readonly string[],
+): string | null {
+  const host = hostnameOf(headers.host);
+  if (!host || !allowedHosts.includes(host)) return `host "${headers.host ?? ''}" is not allowed`;
+  const origin = headers.origin;
+  if (origin === undefined) return null;
+  if (allowedOrigins.includes(origin.replace(/\/+$/, '').toLowerCase())) return null;
+  try {
+    const url = new URL(origin);
+    if ((url.protocol === 'http:' || url.protocol === 'https:') && allowedHosts.includes(url.hostname.toLowerCase().replace(/^\[|\]$/g, ''))) return null;
+  } catch {
+    // "null" and malformed origins fall through to refusal.
+  }
+  return `origin "${origin}" is not allowed`;
+}
+
+/**
+ * Guards expensive endpoints (goals, planning, productions, evaluation): a per-client
  * sliding one-minute window plus a global concurrency cap. In-memory by
  * design — Jovi Core is a single-process modular monolith.
  */

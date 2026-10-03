@@ -67,7 +67,23 @@ export function findViolation(text: string, pattern: RegExp, options: { privacyS
   return null;
 }
 
-export const HUMAN_CLAIM = /\b(i'?m|i am|she'?s|she is|as) (a )?(real|actual) (person|human|girl|woman)\b|\b(i'?m|i am) (not (an? )?(ai|bot|robot)|human)\b|\bnot an ai\b/i;
+/**
+ * Claims (or implications) that Jovi is human. Heuristic: catches common
+ * phrasings and paraphrases ("I am a human", "a real flesh-and-blood woman",
+ * "I'm not artificial", "living, breathing person", "100% real"); it cannot
+ * prove absence. Negated / safeguard phrasing is skipped by findViolation.
+ */
+const SUBJECT = "(?:i'?m|i am|she'?s|she is|jovi is|jovi's|as)";
+export const HUMAN_CLAIM = new RegExp(
+  [
+    `\\b${SUBJECT}\\s+(?:an?\\s+)?(?:(?:real|actual|genuine|living|breathing|flesh[- ]and[- ]blood|human)[\\s,-]+){1,4}(?:person|human|girl|woman|being|lady|individual)\\b`,
+    `\\b${SUBJECT}\\s+(?:an?\\s+)?human\\b`,
+    "\\b(?:i'?m|i am|she'?s|she is|jovi is|jovi's)\\s+(?:not|never|no)\\s+(?:an?\\s+)?(?:ai|a\\.i\\.|artificial|bot|robot|virtual(?!\\s+assistant)|computer|program|machine|algorithm|digital|synthetic)\\b",
+    "\\b(?:i'?m|i am|she'?s|she is|jovi is)\\s+(?:100%|totally|completely|fully|actually|really)\\s+(?:real|human)\\b",
+    '\\bnot an ai\\b',
+  ].join('|'),
+  'i',
+);
 export const PRIVACY = [
   /\b(my|her) (home )?address\b/i,
   /\bwhere (i|she) (actually )?lives?\b/i,

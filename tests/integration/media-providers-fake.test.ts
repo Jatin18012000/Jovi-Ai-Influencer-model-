@@ -21,7 +21,7 @@ import {
   type FakeComfyUI,
   type FakeElevenLabs,
 } from '../fakes/fake-media.js';
-import { createTestCore } from '../helpers.js';
+import { clearForMedia, createTestCore } from '../helpers.js';
 
 /**
  * FAKE-SERVER / FAKE-BINARY integration tests. They exercise the real adapter
@@ -129,6 +129,7 @@ describe('ComfyUI through MediaService (fake server) — verified COMPLETED asse
       { taskId: task.id, sourceType: 'DIRECT', sourcePlanningTaskId: null, ideaId: 'i', idea: {}, productionContext: {}, identityVersion: 1, visualIdentityVersion: 1, simulated: false },
       scope,
     );
+    clearForMedia(core, p.id);
     const asset = await core.media.generateImage(
       { productionId: p.id, sceneId: 'sc1', aspectRatio: '9:16', request: { sceneId: 'sc1', prompt: 'Jovi in London', negativePrompt: '', aspectRatio: '9:16', referenceImages: [] } },
       scope,

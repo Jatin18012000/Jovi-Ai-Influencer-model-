@@ -44,9 +44,23 @@ export const ExternalMemoryInputSchema = z.object({
 });
 export type ExternalMemoryInput = z.input<typeof ExternalMemoryInputSchema>;
 
-/** Trusted = written by the seed or by an agent through the ToolKit. Everything else is untrusted data. */
+/** Internal = written by the seed or by an agent through the ToolKit; external writes can never overwrite it. */
 export function isTrustedSource(source: string): boolean {
   return source.startsWith('seed:') || source.startsWith('agent:');
+}
+
+/**
+ * Provenance for prompt rendering (security remediation R-03):
+ *  - `trusted`: human-curated seed data;
+ *  - `derived`: written by an agent, but derived from user/API goals and model
+ *    output — it can carry injected text, so it is data, never instructions;
+ *  - `untrusted`: arrived from outside the system (API).
+ */
+export type MemoryTrust = 'trusted' | 'derived' | 'untrusted';
+export function memoryTrust(source: string): MemoryTrust {
+  if (source.startsWith('seed:')) return 'trusted';
+  if (source.startsWith('agent:')) return 'derived';
+  return 'untrusted';
 }
 
 export interface MemoryItem {

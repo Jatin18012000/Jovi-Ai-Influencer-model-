@@ -14,7 +14,7 @@ import { createMediaProvidersFromConfig } from '../../src/media/providers/index.
 import { SimulatedImageProvider, SimulatedVoiceProvider } from '../../src/media/providers/simulated-providers.js';
 import { GoogleFlowVideoProvider } from '../../src/media/providers/unintegrated-providers.js';
 import { startFakeComfyUI, TEST_WORKFLOW, TestImageProvider, TestVideoProvider, type FakeComfyUI } from '../fakes/fake-media.js';
-import { createTestCore } from '../helpers.js';
+import { clearForMedia, createTestCore } from '../helpers.js';
 
 let dir: string;
 beforeEach(() => {
@@ -205,6 +205,7 @@ describe('MediaService: no fake success', () => {
       { taskId: task.id, sourceType: 'DIRECT', sourcePlanningTaskId: null, ideaId: 'idea-1', idea: {}, productionContext: {}, identityVersion: 1, visualIdentityVersion: 1, simulated: false },
       scope,
     );
+    clearForMedia(core, p.id);
     return { productionId: p.id, scope };
   }
   const job = (productionId: string) => ({

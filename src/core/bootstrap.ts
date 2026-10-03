@@ -6,6 +6,7 @@ import { CreatorPlanningPipeline, IdeationAgent, ResearchAgent, StrategyAgent, T
 import { PLANNED_AGENTS } from '../agents/planned-agents.js';
 import { CreativeProductionPipeline } from '../agents/production/production-pipeline.js';
 import { MediaInspector } from '../media/media-inspector.js';
+import { ApiCredentialService } from './auth/api-credentials.js';
 import { MediaProviderRegistry } from '../media/media-provider-registry.js';
 import { MediaStore } from '../media/media-store.js';
 import { createMediaProvidersFromConfig } from '../media/providers/index.js';
@@ -56,6 +57,7 @@ export interface JoviCore {
   seedReport: SeedReport | null;
   jobRecovery: { requeued: number; failed: number; released: number };
   events: EventBus;
+  credentials: ApiCredentialService;
   tasks: TaskService;
   jobs: JobQueue;
   worker: JobWorker;
@@ -99,6 +101,7 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   const { db, sqlite } = database;
 
   const events = new EventBus(sqlite, logger.child({ component: 'events' }));
+  const credentials = new ApiCredentialService(db, events, { token: config.api.token, scopes: config.api.tokenScopes });
   const tasks = new TaskService(db);
   const jobs = new JobQueue(db, sqlite, events, logger.child({ component: 'jobs' }), {
     defaultMaxAttempts: config.jobs.maxAttempts,
@@ -135,8 +138,10 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   for (const provider of options.mediaProviders ?? createMediaProvidersFromConfig(config, mediaStore)) mediaProviders.register(provider);
   const assets = new AssetService(db);
   const mediaInspector = new MediaInspector({ ffprobePath: config.media.ffprobePath });
-  const media = new MediaService(mediaProviders, assets, mediaStore, mediaInspector, logger.child({ component: 'media' }), config.media.maxAttempts);
   const productions = new ProductionService(db, assets);
+  const media = new MediaService(mediaProviders, assets, mediaStore, mediaInspector, logger.child({ component: 'media' }), config.media.maxAttempts, (id) =>
+    productions.safetyClearance(id),
+  );
 
   // Agents receive no services: only the runner holds them, behind the ToolKit.
   const executive = new ExecutiveAgent(prompts);
@@ -206,6 +211,7 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
     seedReport,
     jobRecovery,
     events,
+    credentials,
     tasks,
     jobs,
     worker,

@@ -54,8 +54,11 @@ npm run start:dev             # tsx, http://127.0.0.1:3000
 npm run build && npm start    # compiled
 ```
 
+On first start the API creates an `owner` credential (all scopes) and prints its token **once** to stderr; only its SHA-256 hash is stored. Create narrower credentials with `npm run jovi -- --api-token create --name n8n --scopes read,operate`.
+
 ```bash
 curl -s -X POST http://127.0.0.1:3000/api/jovi/goal \
+  -H "authorization: Bearer $JOVI_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"goal":"Create an Instagram Reel concept introducing Jovi to a new audience.","privacy":"LOCAL_ONLY"}'
 ```
@@ -116,21 +119,30 @@ npm run jovi -- --plan "<goal>"           # Phase 7 planning
 npm run jovi -- --produce "<goal>"        # Phase 7 planning → Phase 8 production of the recommended idea
 npm run jovi -- --produce --from-plan <planningTaskId> [--idea idea-2] [--aspect-ratio 9:16]
 npm run jovi -- --production <productionId>                 # status, assets, QA, publishing gate
-npm run jovi -- --decide <productionId> --decision APPROVE --reviewer "<name>" [--acknowledge-warnings]
+npm run jovi -- --decide <productionId> --decision APPROVE [--acknowledge-warnings] [--note "<text>"] [--yes]
+                                                            # HUMAN: reviewer = your OS account (local:<user>); retype the id to confirm
 npm run jovi -- --simulate --produce "<goal>"               # simulation: canned text + SIMULATED media
-npm run jovi -- --regenerate-media <productionId> --requested-by "<name>" [--kinds IMAGE,VOICE] [--include-completed]
+npm run jovi -- --regenerate-media <productionId> [--kinds IMAGE,VOICE] [--include-completed] [--yes]
                                                             # HUMAN: redo media (text reused), re-edit, re-QA
 npm run jovi -- --visual-identity                           # active visual identity + versions
-npm run jovi -- --set-visual-identity profile.json --approved-by "<name>" --summary "<why>"   # HUMAN: lock appearance
+npm run jovi -- --set-visual-identity profile.json --summary "<why>" [--yes]   # HUMAN: lock appearance (retype "identity")
+npm run jovi -- --api-token create --name <name> --scopes read,operate[,approve,identity-admin]   # token shown once
+npm run jovi -- --api-token list | --api-token revoke --name <name>
 ```
+
+Actor fields (`reviewer`, `requestedBy`, `approvedBy`) are never typed in: the CLI uses the local OS account and the API uses the credential principal (`api:<name>`). Interactive confirmations need a TTY; scripts must pass `--yes`.
 
 The CLI calls the same `JoviOrchestrator.executeGoal()` as the API.
 
 ## API
 
+Every route except `/health` requires `Authorization: Bearer <token>` with the right **scope**: `read` (GET), `operate` (goals, planning, productions, regeneration, memory, evaluation), `approve` (`/decision`), `identity-admin` (`POST /api/visual-identity`). Requests whose `Host` or `Origin` is not allow-listed get `403` (DNS-rebinding defence).
+
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/health` | Liveness, DB, provider availability, `lmStudio` discovery, `simulationMode` |
+| GET | `/health` | **Public** minimal liveness: `{status, service, database}` |
+| GET | `/api/status` | Detailed status: DB, provider availability, `lmStudio` discovery, `simulationMode` |
+| GET | `/api/auth/whoami` | The calling principal and its scopes |
 | GET | `/api/jovi/identity` | Active identity + version history |
 | GET | `/api/jovi/strategy` | Active strategy version |
 | POST | `/api/jovi/goal` | Execute a goal (`{"goal", "tier"?, "privacy"?: "LOCAL_ONLY", "mode"?: "sync" \| "async"}`) — rate limited |
@@ -150,22 +162,25 @@ The CLI calls the same `JoviOrchestrator.executeGoal()` as the API.
 | GET | `/api/productions/:id/{script,storyboard,visual-prompts,edit-plan,qa}` | Latest artifact of that kind |
 | GET | `/api/productions/:id/assets` | Media asset records (status, provider, location, reason) |
 | GET | `/api/productions/:id/publishing-gate` | `eligibleForHumanPublishing`, blockers; `autonomousPublishingAllowed` is always `false` |
-| POST | `/api/productions/:id/decision` | HUMAN decision `{"decision": "APPROVE"\|"REJECT", "reviewer", "note"?, "acknowledgeWarnings"?}` — `409` if QA does not allow it |
+| POST | `/api/productions/:id/decision` | HUMAN decision (`approve` scope) `{"decision": "APPROVE"\|"REJECT", "note"?, "acknowledgeWarnings"?}`; the reviewer is the credential principal (a body `reviewer` is rejected) — `409` if QA does not allow it |
 | GET | `/api/media/providers` | Media provider states (AVAILABLE / NOT_CONFIGURED / UNREACHABLE / MISCONFIGURED / NOT_INTEGRATED), capabilities and preference order |
-| POST | `/api/productions/:id/regenerate-media` | HUMAN request `{"requestedBy", "reason"?, "kinds"?: ["IMAGE"\|"VIDEO"\|"VOICE"], "includeCompleted"?, "mode"?}` for a BLOCKED / AWAITING_HUMAN_APPROVAL production — `409` otherwise; rate limited |
+| POST | `/api/productions/:id/regenerate-media` | HUMAN request `{"reason"?, "kinds"?: ["IMAGE"\|"VIDEO"\|"VOICE"], "includeCompleted"?, "mode"?}` for a BLOCKED / AWAITING_HUMAN_APPROVAL production — `409` otherwise; rate limited |
 | GET | `/api/visual-identity` | Active visual identity + versions |
-| POST | `/api/visual-identity` | HUMAN: new version `{"profile", "approvedBy", "changeSummary"}`; LOCKED when every appearance anchor is set; reference images must be files in `JOVI_REFERENCE_DIR` |
+| POST | `/api/visual-identity` | HUMAN (`identity-admin` scope): new version `{"profile", "changeSummary"}`, approver = credential principal; LOCKED when every appearance anchor is set; reference images must be files in `JOVI_REFERENCE_DIR` |
 
-`POST /api/jovi/goal` returns `taskId`, `jobId`, `decisionId`, `selectedAction`, `options`, `confidence`, `reasoningSummary`, `nextActions`, `modelsUsed` (with `executionType`), `eventsGenerated`, `simulated` (plus `correlationId`, `selection`, `interpretation`, `priorities`, `contentDirection`, `evaluationSummary`, `attempts`). Status codes: `200` completed, `202` queued (async), `400` invalid input, `409` conflict, `429` rate limited (`Retry-After`), `503` no model available, `500` other failure.
+`POST /api/jovi/goal` returns `taskId`, `jobId`, `decisionId`, `selectedAction`, `options`, `confidence`, `reasoningSummary`, `nextActions`, `modelsUsed` (with `executionType`), `eventsGenerated`, `simulated` (plus `correlationId`, `selection`, `interpretation`, `priorities`, `contentDirection`, `evaluationSummary`, `attempts`). Status codes: `200` completed, `202` queued (async), `400` invalid input, `401` missing/invalid credential, `403` wrong scope or foreign Host/Origin, `409` conflict, `429` rate limited (`Retry-After`), `503` no model available, `500` other failure.
 
 ---
 
 ## Security
 
-- **Bind guard:** the API refuses to start on a non-loopback `HOST` unless `JOVI_API_TOKEN` is set (`Authorization: Bearer <token>`). Expensive endpoints are rate limited per client (`JOVI_GOAL_RATE_LIMIT_PER_MINUTE`) and capped in concurrency (`JOVI_MAX_CONCURRENT_GOALS`).
+- **Authentication is mandatory** (security remediation R-01/R-04, see `docs/audit/14-p0-remediation-status.md`). Credentials are 256-bit `jovi_…` tokens stored as SHA-256 hashes in `api_credentials`, each with scopes `read` / `operate` / `approve` / `identity-admin`, revocable by name (names are never reused). An optional `JOVI_API_TOKEN` (≥ 32 characters) is an operator token with `JOVI_API_TOKEN_SCOPES` (default `read,operate`). Who approved, regenerated or changed visual identity is always the authenticated principal.
+- **Host/Origin allow-list:** `localhost`, `127.0.0.1`, `::1`, the bind host and `JOVI_ALLOWED_HOSTS`; browser `Origin`s must use one of those hosts or be listed in `JOVI_ALLOWED_ORIGINS`. Responses carry `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, a deny-all CSP and `Cache-Control: no-store`.
+- **Bind guard:** a non-loopback `HOST` requires `JOVI_ALLOW_NETWORK_BIND=true` and logs a plain-HTTP warning (put TLS in front). Expensive endpoints are rate limited per client (`JOVI_GOAL_RATE_LIMIT_PER_MINUTE`) and capped in concurrency (`JOVI_MAX_CONCURRENT_GOALS`).
+- **Pre-generation safety gate** (R-02): after the visual prompts and before **any** media request, the `safety-review` agent runs the identity/safety heuristics and an independent model review against a fixed rubric (adult only, AI transparency, identity consistency, no real-person likeness, platform safety). Anything but a full ALLOW — including a model error or invalid output — is `BLOCK` (fail-closed) and the production stops `BLOCKED`. `MediaService` independently refuses to call a provider without a current ALLOW review (`SAFETY_REVIEW_REQUIRED` / `_BLOCKED` / `_STALE`). Pattern checks are labelled `HEURISTIC` in QA: they are not proof of compliance.
 - **Enforced permissions:** agents receive no services — only a per-run **ToolKit** whose every method checks the agent's allow-list and level (capped at `JOVI_MAX_PERMISSION_LEVEL`). Every call, allowed or denied, is stored in `agent_runs.tool_calls`. There are no shell, filesystem, credential, publishing or infrastructure tools. Executive = `LEVEL_2_MODIFY`.
 - **Next actions:** required level = max(text classification, owning agent's level). External (`LEVEL_4+`) or unknown-owner actions are `REQUIRES_APPROVAL`.
-- **Memory poisoning:** `POST /api/memory` accepts only FACT/PREFERENCE/LEARNING/AUDIENCE/CONTENT/EXPERIMENT/TEMPORARY, forces `source=api`, caps importance/confidence, limits size, and cannot overwrite seed/agent memory (409). Retrieved memory is rendered inside `<memory_data>` with a trust label, angle brackets escaped, and the model is told it is data, not instructions.
+- **Memory poisoning:** `POST /api/memory` accepts only FACT/PREFERENCE/LEARNING/AUDIENCE/CONTENT/EXPERIMENT/TEMPORARY, forces `source=api`, caps importance/confidence, limits size, and cannot overwrite seed/agent memory (409). Retrieved memory carries provenance (R-03): `trusted` (seed only), `derived` (agent-written from goals and model output) or `untrusted` (API). Memory, knowledge, recent decisions and similar past concepts are rendered only inside escaped `<memory_data>` / `<knowledge_data>` / `<history_data>` blocks with those labels, and the model is told they are data, not instructions. Decision memory stores a SHA-256 of the objective, never the raw goal text.
 - **Identity:** prompt files contain no identity facts; they are rendered from the *active* identity version.
 - **Secrets** come only from the environment / `.env` (git-ignored, real env wins); logs show keys as `configured`/`missing`. Model output is parsed as Zod-validated data, never executed.
 - **Jobs** keep a heartbeat; abandoned jobs (crashed process) are recovered at startup and periodically by the worker.
@@ -266,6 +281,7 @@ Setup on a Mac: `brew install ffmpeg` → `JOVI_FFMPEG_PATH=/opt/homebrew/bin/ff
 - Text overlays are not burned into renders (captions are a soft subtitle track); music is not selected.
 - The Phase 8 text agents were validated against real LM Studio (`google/gemma-4-12b-qat`, 2/2) on the owner's machine; that run was not clean (one schema-length failure, one ~5-minute header timeout).
 - No real-model run is part of CI (see `npm run test:lmstudio:real`).
+- The pre-generation safety review (R-02) has been exercised only with test-double models; its effectiveness with a real local model is not yet measured. Its heuristics are pattern checks, not proof of compliance.
 - One model per provider is routed (a second loaded LM Studio model is not yet used as an independent evaluator).
 - Semantic memory is a lexical baseline; model competition is availability-only; goal tiering is a keyword heuristic; pricing figures are estimates.
 - No dashboard, publishing, analytics ingestion or n8n integration yet.

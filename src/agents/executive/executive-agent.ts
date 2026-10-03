@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { InvalidModelOutputError } from '../../core/errors.js';
 import { identityPromptVariables } from '../../core/identity/identity-prompt.js';
 import { ContextEngine, type JoviContext } from '../../core/orchestrator/context-engine.js';
@@ -194,7 +195,8 @@ export class ExecutiveAgent implements Agent<ExecutiveInput, ExecutiveDecision, 
       type: 'DECISION',
       key: `decision.${output.decisionId}`,
       value: {
-        objective: output.objective,
+        // R-03: the objective is user/API text; memory keeps only its fingerprint (the decision record keeps the audit copy).
+        objectiveSha256: createHash('sha256').update(output.objective).digest('hex'),
         selected: { id: selected.id, title: selected.title, format: selected.format, pillar: selected.pillar, hook: selected.hook },
         selectionMethod: output.selection.method,
         confidence: output.confidence,

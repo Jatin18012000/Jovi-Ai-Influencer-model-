@@ -365,7 +365,7 @@ export const productionArtifacts = sqliteTable(
     productionId: text('production_id')
       .notNull()
       .references(() => productions.id),
-    kind: text('kind', { enum: ['SCRIPT', 'STORYBOARD', 'VISUAL_PROMPTS', 'EDIT_PLAN', 'QA_REPORT'] }).notNull(),
+    kind: text('kind', { enum: ['SCRIPT', 'STORYBOARD', 'VISUAL_PROMPTS', 'SAFETY_REVIEW', 'EDIT_PLAN', 'QA_REPORT'] }).notNull(),
     version: integer('version').notNull(),
     content: text('content', { mode: 'json' }).$type<Json>().notNull(),
     agentRunId: text('agent_run_id'),
@@ -405,4 +405,29 @@ export const mediaAssets = sqliteTable(
     updatedAt: updatedAt(),
   },
   (t) => [index('media_assets_production_idx').on(t.productionId), index('media_assets_status_idx').on(t.status)],
+);
+
+// ---------------------------------------------------------------------------
+// API credentials (security remediation R-01/R-04)
+// ---------------------------------------------------------------------------
+
+/**
+ * Scoped API credentials. Only a SHA-256 hash of each token is stored; the
+ * token itself is shown once at creation. A principal's name is the actor
+ * recorded for approvals, regenerations and identity changes.
+ */
+export const apiCredentials = sqliteTable(
+  'api_credentials',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    tokenHash: text('token_hash').notNull(),
+    scopes: text('scopes', { mode: 'json' }).$type<string[]>().notNull(),
+    createdBy: text('created_by').notNull(),
+    createdAt: createdAt(),
+    lastUsedAt: text('last_used_at'),
+    revokedAt: text('revoked_at'),
+    revokedBy: text('revoked_by'),
+  },
+  (t) => [uniqueIndex('api_credentials_name_uq').on(t.name), uniqueIndex('api_credentials_token_hash_uq').on(t.tokenHash)],
 );

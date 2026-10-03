@@ -32,6 +32,7 @@ import {
   type VisualPrompts,
 } from './production-schemas.js';
 import { QAAgent } from './qa-agent.js';
+import { SafetyReviewAgent } from './safety-review-agent.js';
 
 export const CREATIVE_PRODUCTION_JOB = 'creative.production';
 
@@ -99,7 +100,7 @@ interface PipelineDeps {
 /**
  * Phase 8 creative production:
  *
- *   Idea → Script → Storyboard → Visual prompts → {Image ∥ Video ∥ Voice} → Edit plan → QA → human approval boundary
+ *   Idea → Script → Storyboard → Visual prompts → SAFETY REVIEW → {Image ∥ Video ∥ Voice} → Edit plan → QA → human approval boundary
  *
  * Runs as one CREATIVE_PRODUCTION task executed by a SQLite-backed job, so
  * retries, heartbeat and crash recovery come from the existing JobQueue. Each
@@ -112,6 +113,7 @@ export class CreativeProductionPipeline {
     script: ScriptAgent;
     storyboard: StoryboardAgent;
     visualPrompt: VisualPromptAgent;
+    safety: SafetyReviewAgent;
     image: ImageGenerationAgent;
     video: VideoGenerationAgent;
     voice: VoiceAgent;
@@ -124,6 +126,7 @@ export class CreativeProductionPipeline {
       script: new ScriptAgent(deps.prompts),
       storyboard: new StoryboardAgent(deps.prompts),
       visualPrompt: new VisualPromptAgent(deps.prompts),
+      safety: new SafetyReviewAgent(deps.prompts),
       image: new ImageGenerationAgent(),
       video: new VideoGenerationAgent(),
       voice: new VoiceAgent(),
@@ -251,7 +254,7 @@ export class CreativeProductionPipeline {
   private async executeJob(job: Job, scope: ReturnType<EventBus['scope']>): Promise<unknown> {
     // `since` is set for media regeneration jobs: artifacts older than it belong to the previous round.
     const { productionId, since } = job.payload as { productionId: string; since?: string };
-    const fresh = (kind: 'EDIT_PLAN') => {
+    const fresh = (kind: 'EDIT_PLAN' | 'SAFETY_REVIEW') => {
       const at = productions.artifactCreatedAt(productionId, kind);
       return at !== null && (!since || at >= since);
     };
@@ -288,7 +291,15 @@ export class CreativeProductionPipeline {
       if (!productions.latestArtifact(productionId, 'VISUAL_PROMPTS')) {
         await run<VisualPrompts>(this.agents.visualPrompt, { productionId, storyboard, privacy });
       }
-      productions.advance(productionId, 'GENERATING_ASSETS', scope);
+      productions.advance(productionId, 'SAFETY_REVIEW', scope);
+    }
+
+    // R-02: the safety gate between text and media. BLOCK ends the run before any media request.
+    if (status() === 'SAFETY_REVIEW') {
+      if (!fresh('SAFETY_REVIEW') || productions.safetyClearance(productionId)?.startsWith('SAFETY_REVIEW_STALE')) {
+        await run(this.agents.safety, { productionId, privacy });
+      }
+      productions.advance(productionId, productions.safetyClearance(productionId) === null ? 'GENERATING_ASSETS' : 'BLOCKED', scope);
     }
     const prompts = productions.latestArtifact<VisualPrompts>(productionId, 'VISUAL_PROMPTS')!;
 

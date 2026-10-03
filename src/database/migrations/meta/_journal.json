@@ -22,6 +22,13 @@
       "when": 1790685214160,
       "tag": "0002_phase8_creative_production",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1791009700194,
+      "tag": "0003_api_credentials",
+      "breakpoints": true
     }
   ]
 }

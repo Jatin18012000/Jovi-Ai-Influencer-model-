@@ -247,7 +247,8 @@ export const QACheckSchema = z.object({
   name: z.string(),
   result: z.enum(['PASSED', 'FAILED', 'WARNING', 'NOT_VERIFIABLE', 'NOT_APPLICABLE']),
   severity: z.enum(['BLOCKING', 'MAJOR', 'MINOR']),
-  method: z.enum(['DETERMINISTIC', 'MODEL', 'HUMAN_REVIEW']),
+  /** HEURISTIC = pattern-based check: a PASS means no violation pattern was found, not proof of compliance. */
+  method: z.enum(['DETERMINISTIC', 'HEURISTIC', 'MODEL', 'HUMAN_REVIEW']),
   detail: z.string(),
   /** A NOT_VERIFIABLE/FAILED result with this flag prevents human approval. */
   blocksApproval: z.boolean(),
@@ -296,3 +297,47 @@ export const QAModelReviewSchema = z.object({
   summary: z.string().max(800),
 });
 export type QAModelReview = z.infer<typeof QAModelReviewSchema>;
+
+// ---------------------------------------------------------------------------
+// Pre-generation safety review (security remediation R-02)
+// ---------------------------------------------------------------------------
+
+/** The fixed rubric every production must pass before any media is requested. */
+export const SAFETY_RUBRIC = [
+  ['adult_only', 'Jovi and every person shown are clearly adults; nothing depicts, implies or sexualises a minor (age, school context, childlike framing)'],
+  ['ai_transparency', 'Nothing claims or implies that Jovi is human; she is an openly AI, original virtual creator'],
+  ['identity_consistent', "Age, origin and core facts match Jovi's identity"],
+  ['no_real_person_likeness', 'No real person, celebrity or lookalike is depicted, imitated or referenced as a visual target'],
+  ['platform_safe', 'No nudity, sexual or explicit content, hate, self-harm, dangerous acts, or private personal data'],
+] as const;
+export type SafetyCheckId = (typeof SAFETY_RUBRIC)[number][0];
+
+export const SafetyModelReviewSchema = z.object({
+  checks: z
+    .array(
+      z.object({
+        id: z.enum(SAFETY_RUBRIC.map((r) => r[0]) as [SafetyCheckId, ...SafetyCheckId[]]),
+        pass: z.boolean(),
+        note: z.string().max(400).default(''),
+      }),
+    )
+    .min(1),
+  verdict: z.preprocess((v) => (typeof v === 'string' ? v.trim().toUpperCase() : v), z.enum(['ALLOW', 'BLOCK'])),
+  reasons: z.array(z.string().max(300)).max(10).default([]),
+});
+export type SafetyModelReview = z.infer<typeof SafetyModelReviewSchema>;
+
+export const SafetyReviewSchema = z.object({
+  verdict: z.enum(['ALLOW', 'BLOCK']),
+  reasons: z.array(z.string()),
+  heuristic: z.object({ violations: z.array(z.object({ rule: z.string(), match: z.string() })) }),
+  model: z.union([
+    z.object({ available: z.literal(true), provider: z.string(), model: z.string(), review: SafetyModelReviewSchema }),
+    z.object({ available: z.literal(false), reason: z.string() }),
+  ]),
+  textsReviewed: z.number().int().nonnegative(),
+  identityVersion: z.number().int(),
+  visualIdentityVersion: z.number().int(),
+  reviewedAt: z.string(),
+});
+export type SafetyReview = z.infer<typeof SafetyReviewSchema>;

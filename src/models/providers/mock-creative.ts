@@ -169,6 +169,13 @@ export function mockProduction(taskType: string, prompt: string): unknown {
         })),
       };
     }
+    case 'production.safety_review':
+      // SIMULATION: a canned ALLOW. Real reviews come from a real model; heuristic checks still run.
+      return {
+        checks: ['adult_only', 'ai_transparency', 'identity_consistent', 'no_real_person_likeness', 'platform_safe'].map((id) => ({ id, pass: true, note: `${SIM} canned review` })),
+        verdict: 'ALLOW',
+        reasons: [],
+      };
     case 'production.qa_review':
       return {
         reviews: [

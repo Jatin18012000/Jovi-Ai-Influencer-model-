@@ -113,6 +113,10 @@ export const EventType = z.enum([
   'ASSET_SUPERSEDED',
   'MEDIA_REGENERATION_REQUESTED',
   'VISUAL_IDENTITY_VERSION_CREATED',
+  // Security remediation (R-01..R-04)
+  'API_CREDENTIAL_CREATED',
+  'API_CREDENTIAL_REVOKED',
+  'SAFETY_REVIEW_COMPLETED',
 ]);
 
 /** Kinds of media a production can require. */
@@ -134,6 +138,7 @@ export const ProductionStatus = z.enum([
   'SCRIPTING',
   'STORYBOARDING',
   'PROMPTING',
+  'SAFETY_REVIEW',
   'GENERATING_ASSETS',
   'EDITING',
   'QA',

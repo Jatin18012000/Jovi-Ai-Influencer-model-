@@ -29,7 +29,21 @@ export interface QAInput {
   assets: MediaAsset[];
   modelReview: { review: QAModelReview; provider: string; model: string } | null;
   modelReviewError?: string;
+  /** Pre-generation safety review (R-02). `null` = media pipeline ran without one; undefined = not evaluated here. */
+  safetyReview?: { verdict: string; reasons: string[] } | null;
 }
+
+/** Pattern-based checks (R-02): reported as HEURISTIC so a reviewer never reads them as proof. */
+const HEURISTIC_CHECKS = new Set([
+  'identity.age',
+  'identity.origin',
+  'personality.cliches',
+  'brand.transparency',
+  'safety.prohibited_content',
+  'safety.privacy',
+  'safety.real_person_likeness',
+  'safety.unauthorized_claims',
+]);
 
 const UNAUTHORIZED_CLAIMS = /\b(guaranteed|clinically proven|cures?|cured|official (?:partner|ambassador)|sponsored by|in partnership with|risk[- ]free|get rich|#ad)\b/i;
 const VERTICAL_FORMATS = ['REEL', 'STORY'];
@@ -42,16 +56,19 @@ const check = (
   result: Result,
   detail: string,
   opts: { severity?: QACheck['severity']; method?: QACheck['method']; blocksApproval?: boolean } = {},
-): QACheck => ({
-  id,
-  category,
-  name,
-  result,
-  detail,
-  severity: opts.severity ?? 'BLOCKING',
-  method: opts.method ?? 'DETERMINISTIC',
-  blocksApproval: opts.blocksApproval ?? false,
-});
+): QACheck => {
+  const heuristic = !opts.method && HEURISTIC_CHECKS.has(id);
+  return {
+    id,
+    category,
+    name,
+    result,
+    detail: heuristic && result === 'PASSED' ? `${detail} (heuristic pattern check — not proof of compliance)` : detail,
+    severity: opts.severity ?? 'BLOCKING',
+    method: opts.method ?? (heuristic ? 'HEURISTIC' : 'DETERMINISTIC'),
+    blocksApproval: opts.blocksApproval ?? false,
+  };
+};
 
 /**
  * Structured creative QA. Deterministic checks are authoritative for
@@ -184,6 +201,14 @@ export function runCreativeQA(input: QAInput): QAReport {
   }
 
   // ---------------- SAFETY ----------------
+  if (input.safetyReview !== undefined) {
+    const review = input.safetyReview;
+    checks.push(
+      review?.verdict === 'ALLOW'
+        ? check('safety.pre_generation_review', 'SAFETY', 'Pre-generation safety review', 'PASSED', 'heuristic + independent model review allowed media generation', { method: 'MODEL' })
+        : check('safety.pre_generation_review', 'SAFETY', 'Pre-generation safety review', 'FAILED', review ? `review verdict ${review.verdict}: ${review.reasons.join('; ').slice(0, 300)}` : 'media pipeline ran without a safety review'),
+    );
+  }
   const everything = [...content, ...visualText].join('\n');
   const explicit = findViolation(everything, EXPLICIT);
   checks.push(explicit ? check('safety.prohibited_content', 'SAFETY', 'Prohibited content', 'FAILED', `"${explicit}"`) : check('safety.prohibited_content', 'SAFETY', 'Prohibited content', 'PASSED', 'none found'));

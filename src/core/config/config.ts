@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { PermissionLevel } from '../../types/enums.js';
+import { assertStrongToken, parseScopes, type ApiScope } from '../auth/api-credentials.js';
 
 /**
  * Runtime configuration. Secrets come exclusively from environment variables
@@ -79,10 +80,19 @@ const EnvSchema = z.object({
 
   HOST: z.string().default('127.0.0.1'),
   PORT: z.coerce.number().int().positive().default(3000),
-  /** Bearer token for /api routes. Required when HOST is not a loopback address. */
+  /**
+   * Optional operator bearer token (≥ 32 chars). Authentication is ALWAYS
+   * required; without this, use scoped credentials (`npm run jovi -- --api-token create`).
+   */
   JOVI_API_TOKEN: optionalSecret,
-  /** Escape hatch for container setups whose published port is itself loopback-only. */
-  JOVI_ALLOW_UNAUTHENTICATED_NETWORK: booleanFlag(false),
+  /** Scopes granted to JOVI_API_TOKEN (default: read,operate — no approval, no identity changes). */
+  JOVI_API_TOKEN_SCOPES: z.string().default('read,operate'),
+  /** Host header values the API answers to (DNS-rebinding defence). Loopback names are always allowed. */
+  JOVI_ALLOWED_HOSTS: z.string().default(''),
+  /** Extra browser origins allowed to call the API (e.g. a future dashboard), comma-separated. */
+  JOVI_ALLOWED_ORIGINS: z.string().default(''),
+  /** Allow binding beyond loopback (containers). Authentication stays mandatory; use a TLS proxy. */
+  JOVI_ALLOW_NETWORK_BIND: booleanFlag(false),
   JOVI_GOAL_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(10),
   JOVI_MAX_CONCURRENT_GOALS: z.coerce.number().int().positive().default(2),
 
@@ -124,6 +134,7 @@ const OBSOLETE_VARIABLES: Record<string, string> = {
   OLLAMA_MODEL: 'Ollama was removed; use LM_STUDIO_MODEL',
   OLLAMA_ENABLED: 'Ollama was removed; use LM_STUDIO_ENABLED',
   JOVI_ENABLE_MOCK_PROVIDER: 'the mock is simulation-only; use JOVI_SIMULATION_MODE',
+  JOVI_ALLOW_UNAUTHENTICATED_NETWORK: 'authentication is now always required; use JOVI_ALLOW_NETWORK_BIND to bind beyond loopback',
 };
 
 export type JoviConfig = {
@@ -153,7 +164,10 @@ export type JoviConfig = {
     host: string;
     port: number;
     token: string | undefined;
-    allowUnauthenticatedNetwork: boolean;
+    tokenScopes: ApiScope[];
+    allowedHosts: string[];
+    allowedOrigins: string[];
+    allowNetworkBind: boolean;
     goalRateLimitPerMinute: number;
     maxConcurrentGoals: number;
   };
@@ -179,8 +193,24 @@ export type JoviConfig = {
   warnings: string[];
 };
 
+const list = (value: string) =>
+  value
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+
+/** Loopback names are always allowed; a specific bind host and JOVI_ALLOWED_HOSTS are added. */
+function allowedHostsFor(bindHost: string, extra: string): string[] {
+  const hosts = new Set(['localhost', '127.0.0.1', '::1']);
+  const bind = bindHost.toLowerCase().replace(/^\[|\]$/g, '');
+  if (bind !== '0.0.0.0' && bind !== '::') hosts.add(bind);
+  for (const h of list(extra)) hosts.add(h.toLowerCase().replace(/^\[|\]$/g, ''));
+  return [...hosts];
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
   const parsed = EnvSchema.parse(env);
+  if (parsed.JOVI_API_TOKEN) assertStrongToken(parsed.JOVI_API_TOKEN);
   const warnings = Object.entries(OBSOLETE_VARIABLES)
     .filter(([name]) => env[name] !== undefined && env[name] !== '')
     .map(([name, hint]) => `${name} is obsolete and ignored: ${hint}`);
@@ -219,7 +249,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
       host: parsed.HOST,
       port: parsed.PORT,
       token: parsed.JOVI_API_TOKEN,
-      allowUnauthenticatedNetwork: parsed.JOVI_ALLOW_UNAUTHENTICATED_NETWORK,
+      tokenScopes: parseScopes(parsed.JOVI_API_TOKEN_SCOPES),
+      allowedHosts: allowedHostsFor(parsed.HOST, parsed.JOVI_ALLOWED_HOSTS),
+      allowedOrigins: list(parsed.JOVI_ALLOWED_ORIGINS).map((o) => o.replace(/\/+$/, '').toLowerCase()),
+      allowNetworkBind: parsed.JOVI_ALLOW_NETWORK_BIND,
       goalRateLimitPerMinute: parsed.JOVI_GOAL_RATE_LIMIT_PER_MINUTE,
       maxConcurrentGoals: parsed.JOVI_MAX_CONCURRENT_GOALS,
     },

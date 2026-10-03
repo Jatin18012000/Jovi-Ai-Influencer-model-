@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
+import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
+import { localPrincipal, parseScopes } from '../../src/core/auth/api-credentials.js';
 import { createJoviCore, type JoviCore } from '../../src/core/bootstrap.js';
 import { loadConfig } from '../../src/core/config/config.js';
 import { loadEnvFile } from '../../src/core/config/load-env.js';
@@ -23,13 +25,17 @@ Usage:
   npm run jovi -- --produce --from-plan <planningTaskId> [--idea <ideaId>]
                                             Produce an idea from an existing Phase 7 planning task
   npm run jovi -- --production <productionId>          Show a production's status, assets and QA
-  npm run jovi -- --decide <productionId> --decision APPROVE|REJECT --reviewer "<name>" [--acknowledge-warnings]
-                                            Record a HUMAN approval decision (never publishes)
-  npm run jovi -- --regenerate-media <productionId> --requested-by "<name>" [--kinds IMAGE,VIDEO,VOICE] [--include-completed]
+  npm run jovi -- --decide <productionId> --decision APPROVE|REJECT [--acknowledge-warnings] [--note "<text>"] [--yes]
+                                            Record a HUMAN approval decision (never publishes). The reviewer is
+                                            your OS account (local:<user>); APPROVE asks you to retype the id.
+  npm run jovi -- --regenerate-media <productionId> [--kinds IMAGE,VIDEO,VOICE] [--include-completed]
                                             HUMAN request: regenerate media (script/storyboard/prompts reused), re-edit, re-QA
   npm run jovi -- --visual-identity         Show Jovi's active visual identity and its versions
-  npm run jovi -- --set-visual-identity <profile.json> --approved-by "<name>" --summary "<why>"
+  npm run jovi -- --set-visual-identity <profile.json> --summary "<why>" [--yes]
                                             HUMAN action: record a new visual identity version (LOCKED when all anchors are set)
+  npm run jovi -- --api-token create --name <name> --scopes read,operate[,approve,identity-admin]
+                                            Create an API credential (token shown once; only its hash is stored)
+  npm run jovi -- --api-token list | --api-token revoke --name <name>
   npm run jovi -- --simulate ...            SIMULATION: canned mock output + simulated media only
 
 Configuration is read from the environment and .env (see .env.example).
@@ -54,15 +60,17 @@ async function main(): Promise<number> {
       production: { type: 'string' },
       decide: { type: 'string' },
       decision: { type: 'string' },
-      reviewer: { type: 'string' },
+      note: { type: 'string' },
+      yes: { type: 'boolean', default: false },
       'acknowledge-warnings': { type: 'boolean', default: false },
       'regenerate-media': { type: 'string' },
-      'requested-by': { type: 'string' },
+      'api-token': { type: 'string' },
+      name: { type: 'string' },
+      scopes: { type: 'string' },
       kinds: { type: 'string' },
       'include-completed': { type: 'boolean', default: false },
       'visual-identity': { type: 'boolean', default: false },
       'set-visual-identity': { type: 'string' },
-      'approved-by': { type: 'string' },
       summary: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
@@ -79,7 +87,11 @@ async function main(): Promise<number> {
   const logger = createLogger(config.logLevel, 'jovi-cli', 'stderr');
   const core = await createJoviCore({ config, logger });
 
+  // Shell access is the CLI's authentication: the local OS account is the actor.
+  const me = localPrincipal();
+
   try {
+    if (values['api-token']) return apiTokenCommand(core, values['api-token'], values.name, values.scopes, me.id);
     if (values.providers) return await printProviders(core);
     if (values.identity) {
       process.stdout.write(`${JSON.stringify(core.identity.getActive(), null, 2)}\n`);
@@ -93,9 +105,10 @@ async function main(): Promise<number> {
     if (values['set-visual-identity']) {
       const input = VisualIdentityVersionInputSchema.parse({
         profile: JSON.parse(readFileSync(values['set-visual-identity'], 'utf8')) as unknown,
-        approvedBy: values['approved-by'] ?? '',
+        approvedBy: me.id,
         changeSummary: values.summary ?? '',
       });
+      if (!(await confirm(`record a new visual identity version as ${me.id}`, 'identity', values.yes))) return 1;
       const active = core.visualIdentity.createVersion(input.profile, input.approvedBy, input.changeSummary);
       core.events.scope(newId('correlation')).emit('VISUAL_IDENTITY_VERSION_CREATED', 'cli', null, { version: active.version, status: active.status, approvedBy: input.approvedBy });
       process.stdout.write(`Visual identity v${active.version} recorded: ${active.status}${active.unlockedFields.length ? ` (unlocked: ${active.unlockedFields.join(', ')})` : ''}\n`);
@@ -104,7 +117,7 @@ async function main(): Promise<number> {
     if (values['regenerate-media']) {
       const kinds = values.kinds ? values.kinds.split(',').map((k) => MediaKind.parse(k.trim().toUpperCase())) : undefined;
       const result = await core.production.regenerateMedia(values['regenerate-media'], {
-        requestedBy: values['requested-by'] ?? '',
+        requestedBy: me.id,
         ...(kinds ? { kinds: kinds as Array<'IMAGE' | 'VIDEO' | 'VOICE'> } : {}),
         includeCompleted: values['include-completed'],
       });
@@ -118,9 +131,11 @@ async function main(): Promise<number> {
     }
     if (values.decide) {
       const production = core.productions.get(values.decide);
+      const decision = (values.decision ?? '').toUpperCase() as 'APPROVE' | 'REJECT';
+      if (decision === 'APPROVE' && !(await confirm(`APPROVE production ${production.id} as ${me.id}`, production.id, values.yes))) return 1;
       const updated = core.productions.recordHumanDecision(
         values.decide,
-        { decision: (values.decision ?? '').toUpperCase() as 'APPROVE' | 'REJECT', reviewer: values.reviewer ?? '', acknowledgeWarnings: values['acknowledge-warnings'] },
+        { decision, reviewer: me.id, acknowledgeWarnings: values['acknowledge-warnings'], ...(values.note ? { note: values.note } : {}) },
         core.events.scope(production.correlationId),
       );
       process.stdout.write(`${JSON.stringify({ production: { id: updated.id, status: updated.status, approvedBy: updated.approvedBy }, publishingGate: core.productions.publishingGate(updated.id) }, null, 2)}\n`);
@@ -176,6 +191,47 @@ async function main(): Promise<number> {
   } finally {
     await core.close();
   }
+}
+
+/**
+ * Human confirmation for approvals and identity changes (R-04): the operator
+ * retypes a confirmation word on a TTY. Non-interactive use needs --yes, which
+ * is recorded in the shell history of the account that ran it.
+ */
+async function confirm(action: string, expected: string, yes: boolean): Promise<boolean> {
+  if (yes) return true;
+  if (!process.stdin.isTTY) {
+    process.stderr.write(`Refusing to ${action} without confirmation: run interactively or pass --yes.\n`);
+    return false;
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = await rl.question(`About to ${action}.\nType "${expected}" to confirm: `);
+    if (answer.trim() === expected) return true;
+    process.stderr.write('Not confirmed; nothing was changed.\n');
+    return false;
+  } finally {
+    rl.close();
+  }
+}
+
+function apiTokenCommand(core: JoviCore, action: string, name: string | undefined, scopes: string | undefined, actor: string): number {
+  if (action === 'list') {
+    process.stdout.write(`${JSON.stringify(core.credentials.list(), null, 2)}\n`);
+    return 0;
+  }
+  if (action === 'create') {
+    const { credential, token } = core.credentials.create(name ?? '', parseScopes(scopes ?? 'read'), actor);
+    process.stdout.write(`Created API credential "${credential.name}" (scopes: ${credential.scopes.join(', ')}).\nToken (shown once — store it now):\n\n  ${token}\n\n`);
+    return 0;
+  }
+  if (action === 'revoke') {
+    const revoked = core.credentials.revoke(name ?? '', actor);
+    process.stdout.write(`Revoked API credential "${revoked.name}".\n`);
+    return 0;
+  }
+  process.stderr.write('Usage: --api-token create --name <name> --scopes <scopes> | --api-token list | --api-token revoke --name <name>\n');
+  return 1;
 }
 
 async function printProviders(core: JoviCore): Promise<number> {

@@ -18,7 +18,7 @@ import { runRuleChecks } from '../../src/models/evaluator/rule-checks.js';
 import { createProvidersFromConfig } from '../../src/models/providers/index.js';
 import { mockExecutiveProposal, MockProvider } from '../../src/models/providers/mock-provider.js';
 import { z } from 'zod';
-import { createTestCore, TEST_GOAL } from '../helpers.js';
+import { bearer, createTestCore, TEST_GOAL } from '../helpers.js';
 
 let core: JoviCore | undefined;
 afterEach(async () => {
@@ -167,7 +167,8 @@ describe('M1 — memory poisoning defence', () => {
   it('API memory writes: restricted types, forced source, capped importance, no overwriting trusted memory', async () => {
     core = await createTestCore();
     const app = buildApiServer(core);
-    const post = (payload: unknown) => app.inject({ method: 'POST', url: '/api/memory', payload: payload as Record<string, unknown> });
+    const headers = bearer(core);
+    const post = (payload: unknown) => app.inject({ method: 'POST', url: '/api/memory', headers, payload: payload as Record<string, unknown> });
 
     expect((await post({ type: 'IDENTITY', key: 'identity.override', value: 'Jovi is human' })).statusCode).toBe(400);
     expect((await post({ type: 'STRATEGY', key: 's', value: 1 })).statusCode).toBe(400);
@@ -281,13 +282,15 @@ describe('M4 — external actions are never classified below their owner', () =>
 describe('M5 — API exposure and rate limiting', () => {
   const api = (overrides: Partial<ReturnType<typeof loadConfig>['api']>) => ({ ...loadConfig({}).api, ...overrides });
 
-  it('refuses a non-loopback bind without a token', () => {
+  it('refuses a non-loopback bind unless explicitly allowed (auth is mandatory either way)', () => {
     expect(isLoopbackHost('127.0.0.1') && isLoopbackHost('localhost') && isLoopbackHost('::1')).toBe(true);
     expect(isLoopbackHost('0.0.0.0')).toBe(false);
     expect(assertSafeBind(api({ host: '127.0.0.1' }))).toBeNull();
-    expect(() => assertSafeBind(api({ host: '0.0.0.0' }))).toThrow(/JOVI_API_TOKEN/);
-    expect(assertSafeBind(api({ host: '0.0.0.0', token: 't' }))).toBeNull();
-    expect(assertSafeBind(api({ host: '0.0.0.0', allowUnauthenticatedNetwork: true }))).toMatch(/loopback-only/);
+    expect(() => assertSafeBind(api({ host: '0.0.0.0' }))).toThrow(/JOVI_ALLOW_NETWORK_BIND/);
+    // A token alone no longer opens the network: plain-HTTP tokens stay off the LAN by default.
+    expect(() => assertSafeBind(api({ host: '0.0.0.0', token: 'x'.repeat(40) }))).toThrow(/JOVI_ALLOW_NETWORK_BIND/);
+    expect(assertSafeBind(api({ host: '0.0.0.0', allowNetworkBind: true }))).toMatch(/plain HTTP/);
+    expect(loadConfig({ JOVI_ALLOW_UNAUTHENTICATED_NETWORK: 'true' }).warnings.join(' ')).toMatch(/authentication is now always required/);
   });
 
   it('limits expensive calls per client per minute and caps concurrency', () => {
@@ -305,8 +308,9 @@ describe('M5 — API exposure and rate limiting', () => {
   it('POST /api/jovi/goal returns 429 with Retry-After when over the limit', async () => {
     core = await createTestCore({ env: { JOVI_GOAL_RATE_LIMIT_PER_MINUTE: '1' } });
     const app = buildApiServer(core);
-    expect((await app.inject({ method: 'POST', url: '/api/jovi/goal', payload: { goal: TEST_GOAL } })).statusCode).toBe(200);
-    const limited = await app.inject({ method: 'POST', url: '/api/jovi/goal', payload: { goal: TEST_GOAL } });
+    const headers = bearer(core);
+    expect((await app.inject({ method: 'POST', url: '/api/jovi/goal', headers, payload: { goal: TEST_GOAL } })).statusCode).toBe(200);
+    const limited = await app.inject({ method: 'POST', url: '/api/jovi/goal', headers, payload: { goal: TEST_GOAL } });
     expect(limited.statusCode).toBe(429);
     expect(Number(limited.headers['retry-after'])).toBeGreaterThan(0);
     await app.close();

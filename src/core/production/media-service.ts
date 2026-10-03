@@ -60,6 +60,8 @@ export class MediaService {
     private readonly inspector: MediaInspector,
     private readonly logger: Logger,
     private readonly maxAttempts: number,
+    /** R-02: refusal reason when a production is not cleared for media generation (null = cleared). */
+    private readonly clearance: (productionId: string) => string | null = () => null,
   ) {}
 
   generateImage(job: MediaJob<ImageGenerationRequest>, scope: CorrelationScope) {
@@ -99,6 +101,12 @@ export class MediaService {
       { productionId: job.productionId, kind, sceneId: job.sceneId, request: job.request, aspectRatio: job.aspectRatio, ...(job.sourceAssetIds ? { sourceAssetIds: job.sourceAssetIds } : {}) },
       scope,
     );
+    // Structural safety gate (R-02): no provider is called for a production without a current ALLOW review.
+    const refusal = this.clearance(job.productionId);
+    if (refusal) {
+      this.logger.warn({ productionId: job.productionId, kind, refusal }, 'media request refused by the safety gate');
+      return this.assets.transition(asset.id, 'BLOCKED', { statusReason: refusal }, scope);
+    }
     const requirements: MediaRequirements = { ...(job.requirements ?? {}), ...(job.aspectRatio ? { aspectRatio: job.aspectRatio } : {}) };
     const selection = await this.registry.candidates(kind, requirements, job.preferences ?? {});
     const [primary] = selection.candidates;

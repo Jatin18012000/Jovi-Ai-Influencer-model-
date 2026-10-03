@@ -1,5 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
-import Fastify, { type FastifyBaseLogger, type FastifyError, type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyBaseLogger, type FastifyError, type FastifyInstance, type FastifyRequest } from 'fastify';
 import { z, ZodError } from 'zod';
 import type { JoviCore } from '../../src/core/bootstrap.js';
 import { ConflictError, JoviError, NotFoundError, PermissionDeniedError, RateLimitedError, ValidationError } from '../../src/core/errors.js';
@@ -11,7 +10,19 @@ import { ExternalMemoryInputSchema } from '../../src/memory/operational/operatio
 import { assessCompetition } from '../../src/models/competition/model-competition.js';
 import { EvaluableOptionSchema } from '../../src/models/evaluator/rule-checks.js';
 import { EventType, MemoryType } from '../../src/types/enums.js';
-import { ExpensiveCallLimiter } from './security.js';
+import { checkHostAndOrigin, ExpensiveCallLimiter } from './security.js';
+import type { ApiScope, Principal } from '../../src/core/auth/api-credentials.js';
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    /** Set by the authentication hook for every non-public route. */
+    principal?: Principal;
+  }
+  interface FastifyContextConfig {
+    /** Scope required by the route (default: read for GET, operate otherwise). */
+    scope?: ApiScope;
+  }
+}
 import { ProductionRequestSchema } from '../../src/agents/production/production-pipeline.js';
 import { HumanDecisionSchema, MediaRegenerationSchema, type ArtifactKind } from '../../src/core/production/production-service.js';
 import { VisualIdentityVersionInputSchema } from '../../src/core/identity/visual-identity.js';
@@ -69,18 +80,55 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
     }
   };
 
-  // Optional bearer-token auth (everything except /health).
-  const token = core.config.api.token;
-  if (token) {
-    const expected = Buffer.from(`Bearer ${token}`);
-    app.addHook('onRequest', async (request, reply) => {
-      if (request.url === '/health') return;
-      const provided = Buffer.from(request.headers.authorization ?? '');
-      if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
-        return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'Missing or invalid bearer token' });
-      }
-    });
-  }
+  const { allowedHosts, allowedOrigins } = core.config.api;
+  const PUBLIC_ROUTES = new Set(['/health']);
+
+  /**
+   * Security remediation R-01/R-04. Every request:
+   *  1. must name an allowed Host and, if a browser sent one, an allowed Origin
+   *     (DNS-rebinding / cross-site defence) — including /health;
+   *  2. must carry a valid bearer credential (except /health);
+   *  3. must hold the route's scope: GET → read, POST → operate, unless the
+   *     route declares a stricter one (approve, identity-admin).
+   * The authenticated principal — never a request field — is the actor
+   * recorded for approvals, regenerations and identity changes.
+   */
+  app.addHook('onRequest', async (request, reply) => {
+    const refusal = checkHostAndOrigin({ host: request.headers.host, origin: request.headers.origin }, allowedHosts, allowedOrigins);
+    if (refusal) {
+      request.log.warn({ security: 'HOST_OR_ORIGIN_REFUSED', reason: refusal, url: request.url }, 'request refused');
+      return reply.code(403).send({ error: 'FORBIDDEN_HOST_OR_ORIGIN', message: 'Request refused: host or origin not allowed' });
+    }
+    if (PUBLIC_ROUTES.has(request.url.split('?')[0] ?? '')) return;
+
+    const header = request.headers.authorization ?? '';
+    const principal = header.startsWith('Bearer ') ? core.credentials.verify(header.slice(7).trim()) : null;
+    if (!principal) {
+      request.log.warn({ security: 'AUTHENTICATION_FAILED', url: request.url, reason: header ? 'invalid credential' : 'missing credential' }, 'request refused');
+      return reply.code(401).send({ error: 'UNAUTHORIZED', message: 'Missing or invalid bearer token' });
+    }
+    const required: ApiScope = request.routeOptions.config?.scope ?? (request.method === 'GET' || request.method === 'HEAD' ? 'read' : 'operate');
+    if (!principal.scopes.includes(required)) {
+      request.log.warn({ security: 'AUTHORIZATION_FAILED', principal: principal.id, required, url: request.url }, 'request refused');
+      return reply.code(403).send({ error: 'FORBIDDEN_SCOPE', message: `This credential lacks the "${required}" scope` });
+    }
+    request.principal = principal;
+  });
+
+  // Baseline security headers for a JSON API.
+  app.addHook('onSend', async (_request, reply, payload) => {
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('x-frame-options', 'DENY');
+    reply.header('referrer-policy', 'no-referrer');
+    reply.header('content-security-policy', "default-src 'none'; frame-ancestors 'none'");
+    reply.header('cache-control', 'no-store');
+    return payload;
+  });
+
+  const actor = (request: FastifyRequest): string => {
+    if (!request.principal) throw new PermissionDeniedError('no authenticated principal');
+    return request.principal.id;
+  };
 
   app.setErrorHandler((error: FastifyError | Error, request, reply) => {
     if (error instanceof ZodError) {
@@ -99,8 +147,16 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
     return reply.code(statusCode).send({ error: statusCode >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR', message: error.message });
   });
 
+  /** Unauthenticated liveness only — no provider or configuration details (F-12). */
   app.get('/health', async () => {
     core.database.sqlite.prepare('SELECT 1').get();
+    return { status: 'ok', service: 'jovi-core', database: 'ok' };
+  });
+
+  app.get('/api/auth/whoami', async (request) => ({ principal: request.principal?.id, scopes: request.principal?.scopes }));
+
+  /** Detailed status (formerly part of /health); requires the read scope. */
+  app.get('/api/status', async () => {
     const statuses = await core.providers.statusesFresh();
     return {
       status: 'ok',
@@ -197,9 +253,11 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
    * publishes (there is no publishing endpoint in Phase 8). FAIL/BLOCKED QA
    * results cannot be approved (409).
    */
-  app.post('/api/productions/:id/decision', async (request) => {
+  app.post('/api/productions/:id/decision', { config: { scope: 'approve' } }, async (request) => {
     const { id } = IdParams.parse(request.params);
-    const decision = HumanDecisionSchema.parse(request.body ?? {});
+    // The reviewer is the authenticated principal; a body-supplied reviewer is rejected.
+    const body = HumanDecisionSchema.omit({ reviewer: true }).strict().parse(request.body ?? {});
+    const decision = { ...body, reviewer: actor(request) };
     const production = core.productions.get(id);
     const updated = core.productions.recordHumanDecision(id, decision, core.events.scope(production.correlationId));
     return { production: updated, publishingGate: core.productions.publishingGate(id) };
@@ -211,8 +269,8 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
    */
   app.post('/api/productions/:id/regenerate-media', async (request, reply) => {
     const { id } = IdParams.parse(request.params);
-    const body = MediaRegenerationSchema.extend({ mode: z.enum(['sync', 'async']).default('sync') }).parse(request.body ?? {});
-    const result = await guarded(request.ip, () => core.production.regenerateMedia(id, body));
+    const body = MediaRegenerationSchema.omit({ requestedBy: true }).extend({ mode: z.enum(['sync', 'async']).default('sync') }).strict().parse(request.body ?? {});
+    const result = await guarded(request.ip, () => core.production.regenerateMedia(id, { ...body, requestedBy: actor(request) }));
     return reply.code(body.mode === 'async' ? 202 : 200).send(result);
   });
 
@@ -234,10 +292,11 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
    * HUMAN action: record a new visual identity version (e.g. lock Jovi's
    * appearance anchors and reference sheet). No agent tool can do this.
    */
-  app.post('/api/visual-identity', async (request, reply) => {
-    const body = VisualIdentityVersionInputSchema.parse(request.body ?? {});
-    const active = core.visualIdentity.createVersion(body.profile, body.approvedBy, body.changeSummary);
-    core.events.scope(newId('correlation')).emit('VISUAL_IDENTITY_VERSION_CREATED', 'api', null, { version: active.version, status: active.status, approvedBy: body.approvedBy });
+  app.post('/api/visual-identity', { config: { scope: 'identity-admin' } }, async (request, reply) => {
+    const body = VisualIdentityVersionInputSchema.omit({ approvedBy: true }).strict().parse(request.body ?? {});
+    const approvedBy = actor(request);
+    const active = core.visualIdentity.createVersion(body.profile, approvedBy, body.changeSummary);
+    core.events.scope(newId('correlation')).emit('VISUAL_IDENTITY_VERSION_CREATED', 'api', null, { version: active.version, status: active.status, approvedBy });
     return reply.code(201).send({ active, versions: core.visualIdentity.listVersions() });
   });
 

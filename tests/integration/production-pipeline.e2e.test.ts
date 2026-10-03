@@ -15,7 +15,8 @@ import { MockProvider } from '../../src/models/providers/mock-provider.js';
 import type { GenerateRequest, ModelProvider } from '../../src/models/types.js';
 import { EventType } from '../../src/types/enums.js';
 import { TestImageProvider, TestRenderProvider, TestVideoProvider, TestVoiceProvider } from '../fakes/fake-media.js';
-import { createTestCore } from '../helpers.js';
+import { authedInject, bearer, createTestCore } from '../helpers.js';
+import { ALL_SCOPES } from '../../src/core/auth/api-credentials.js';
 
 /**
  * Phase 8 end-to-end. Two kinds of runs:
@@ -129,7 +130,7 @@ describe('creative production pipeline — real path with test doubles', () => {
     const stages = core.events
       .list({ correlationId: result.correlationId, eventType: 'CREATIVE_PRODUCTION_STAGE_CHANGED', limit: 100 })
       .map((e) => (e.payload as { to: string }).to);
-    expect(stages).toEqual(['SCRIPTING', 'STORYBOARDING', 'PROMPTING', 'GENERATING_ASSETS', 'EDITING', 'QA', 'AWAITING_HUMAN_APPROVAL']);
+    expect(stages).toEqual(['SCRIPTING', 'STORYBOARDING', 'PROMPTING', 'SAFETY_REVIEW', 'GENERATING_ASSETS', 'EDITING', 'QA', 'AWAITING_HUMAN_APPROVAL']);
     expect(eventTypes(result)).toEqual(
       expect.arrayContaining([
         'CREATIVE_PRODUCTION_STARTED',
@@ -364,32 +365,35 @@ describe('Phase 8 API', () => {
     core = await createTestCore({ providers: [localModel()], env: { JOVI_MEDIA_DIR: dir } });
     const app = buildApiServer(core);
     await app.ready();
+    const inject = authedInject(app, bearer(core, ALL_SCOPES, 'jatin'));
     try {
-      expect((await app.inject({ method: 'POST', url: '/api/productions', payload: {} })).statusCode).toBe(400);
-      const res = await app.inject({ method: 'POST', url: '/api/productions', payload: { idea: IDEA } });
+      expect((await inject({ method: 'POST', url: '/api/productions', payload: {} })).statusCode).toBe(400);
+      const res = await inject({ method: 'POST', url: '/api/productions', payload: { idea: IDEA } });
       expect(res.statusCode).toBe(200);
       const { productionId, productionStatus } = res.json();
       expect(productionStatus).toBe('BLOCKED');
 
       for (const path of ['script', 'storyboard', 'visual-prompts', 'edit-plan', 'qa']) {
-        const r = await app.inject({ method: 'GET', url: `/api/productions/${productionId}/${path}` });
+        const r = await inject({ method: 'GET', url: `/api/productions/${productionId}/${path}` });
         expect(r.statusCode, path).toBe(200);
       }
-      const assets = await app.inject({ method: 'GET', url: `/api/productions/${productionId}/assets` });
+      const assets = await inject({ method: 'GET', url: `/api/productions/${productionId}/assets` });
       expect(assets.json().assets.every((a: { status: string }) => a.status === 'BLOCKED')).toBe(true);
-      const gate = await app.inject({ method: 'GET', url: `/api/productions/${productionId}/publishing-gate` });
+      const gate = await inject({ method: 'GET', url: `/api/productions/${productionId}/publishing-gate` });
       expect(gate.json()).toMatchObject({ eligibleForHumanPublishing: false, autonomousPublishingAllowed: false });
 
-      const approve = await app.inject({ method: 'POST', url: `/api/productions/${productionId}/decision`, payload: { decision: 'APPROVE', reviewer: 'jatin', acknowledgeWarnings: true } });
+      const approve = await inject({ method: 'POST', url: `/api/productions/${productionId}/decision`, payload: { decision: 'APPROVE', acknowledgeWarnings: true } });
       expect(approve.statusCode).toBe(409);
-      expect((await app.inject({ method: 'POST', url: `/api/productions/${productionId}/decision`, payload: { decision: 'MAYBE' } })).statusCode).toBe(400);
-      const reject = await app.inject({ method: 'POST', url: `/api/productions/${productionId}/decision`, payload: { decision: 'REJECT', reviewer: 'jatin', note: 'no media' } });
+      expect((await inject({ method: 'POST', url: `/api/productions/${productionId}/decision`, payload: { decision: 'MAYBE' } })).statusCode).toBe(400);
+      // The reviewer comes from the credential; a body-supplied reviewer is rejected.
+      expect((await inject({ method: 'POST', url: `/api/productions/${productionId}/decision`, payload: { decision: 'REJECT', reviewer: 'someone-else' } })).statusCode).toBe(400);
+      const reject = await inject({ method: 'POST', url: `/api/productions/${productionId}/decision`, payload: { decision: 'REJECT', note: 'no media' } });
       expect(reject.statusCode).toBe(200);
-      expect(reject.json().production.status).toBe('REJECTED');
+      expect(reject.json().production).toMatchObject({ status: 'REJECTED', approvedBy: 'api:jatin' });
 
-      expect((await app.inject({ method: 'GET', url: '/api/productions/prd_missing' })).statusCode).toBe(404);
+      expect((await inject({ method: 'GET', url: '/api/productions/prd_missing' })).statusCode).toBe(404);
 
-      const providers = await app.inject({ method: 'GET', url: '/api/media/providers' });
+      const providers = await inject({ method: 'GET', url: '/api/media/providers' });
       expect(providers.json().simulationMode).toBe(false);
       expect(providers.json().providers.map((p: { provider: string; state: string }) => `${p.provider}:${p.state}`)).toEqual([
         'comfyui-image:NOT_CONFIGURED',
@@ -400,11 +404,11 @@ describe('Phase 8 API', () => {
         'ffmpeg-render:NOT_CONFIGURED',
       ]);
 
-      const async = await app.inject({ method: 'POST', url: '/api/productions', payload: { idea: IDEA, mode: 'async' } });
+      const async = await inject({ method: 'POST', url: '/api/productions', payload: { idea: IDEA, mode: 'async' } });
       expect(async.statusCode).toBe(202);
       expect(async.json().productionStatus).toBe('CREATED');
       await core.worker.drain();
-      const polled = await app.inject({ method: 'GET', url: `/api/productions/${async.json().productionId}` });
+      const polled = await inject({ method: 'GET', url: `/api/productions/${async.json().productionId}` });
       expect(polled.json().productionStatus).toBe('BLOCKED');
     } finally {
       await app.close();

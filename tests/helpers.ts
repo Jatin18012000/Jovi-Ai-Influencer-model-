@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import type { FastifyInstance, InjectOptions } from 'fastify';
+import { ALL_SCOPES, type ApiScope } from '../src/core/auth/api-credentials.js';
 import { createJoviCore, type JoviCore } from '../src/core/bootstrap.js';
 import { loadConfig } from '../src/core/config/config.js';
 import { mockExecutiveProposal, MockProvider } from '../src/models/providers/mock-provider.js';
@@ -43,4 +46,20 @@ export function proposalJson(overrides: Record<string, unknown> = {}): string {
 
 export function taskTypeOf(request: GenerateRequest): string {
   return request.task.type;
+}
+
+/** Creates a scoped API credential and returns its Authorization header. */
+export function bearer(core: JoviCore, scopes: readonly ApiScope[] = ALL_SCOPES, name = `test-${randomUUID().slice(0, 8)}`): { authorization: string } {
+  const { token } = core.credentials.create(name, scopes, 'test');
+  return { authorization: `Bearer ${token}` };
+}
+
+/** `app.inject` with a credential attached (explicit headers win). */
+export function authedInject(app: FastifyInstance, auth: { authorization: string }) {
+  return (options: InjectOptions) => app.inject({ ...options, headers: { ...auth, ...(options.headers ?? {}) } });
+}
+
+/** Marks a synthetic test production as cleared by the pre-generation safety gate (R-02). */
+export function clearForMedia(core: JoviCore, productionId: string): void {
+  core.productions.saveArtifact(productionId, 'SAFETY_REVIEW', { verdict: 'ALLOW', reasons: [] }, null, core.events.scope('cor_test-clearance'));
 }
