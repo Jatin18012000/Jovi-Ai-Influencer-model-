@@ -48,6 +48,7 @@ import { mockProduction } from '../../../src/models/providers/mock-creative.js';
 import type { AnyMediaProvider } from '../../../src/media/types.js';
 import { TestImageProvider, TestRenderProvider, TestVideoProvider, TestVoiceProvider } from '../../../tests/fakes/fake-media.js';
 import { countingLocalModel, DIRECT_IDEA, LOCKED_PROFILE, VOICE_DURATIONS } from '../../../tests/fakes/production-fixtures.js';
+import { approvalCode, calibrateReviewer, TEST_TOTP_SECRET } from '../../../tests/helpers.js';
 
 type Status = 'HELD' | 'VULNERABLE' | 'PARTIAL' | 'INFO';
 interface Result {
@@ -71,10 +72,16 @@ async function core(env: Record<string, string> = {}, opts: { providers?: Constr
     LM_STUDIO_ENABLED: 'false',
     JOVI_MEDIA_DIR: join(root, 'media'),
     JOVI_REFERENCE_DIR: join(root, 'references'),
+    // Gate C: API approvals need a second factor; legitimate harness approvals send the current code.
+    JOVI_APPROVAL_TOTP_SECRET: TEST_TOTP_SECRET,
     ...env,
   });
   const providers = opts.providers === 'local' ? [countingLocalModel().model] : [new MockProvider()];
-  return createJoviCore({ config, providers, sleep: async () => {}, ...(opts.media ? { mediaProviders: opts.media } : {}) });
+  const c = await createJoviCore({ config, providers, sleep: async () => {}, ...(opts.media ? { mediaProviders: opts.media } : {}) });
+  // N-04: the local test model counts as a measured reviewer, so each check exercises its own control
+  // rather than stopping at the calibration gate (which RA-12 probes separately).
+  for (const s of await c.providers.statusesFresh()) if (s.kind !== 'MOCK' && s.selectedModel) await calibrateReviewer(c, s.provider, s.selectedModel);
+  return c;
 }
 
 /** A scoped API credential for legitimate calls (R-01/R-04); attacks are sent without one or under-scoped. */
@@ -309,14 +316,16 @@ async function main() {
     const identityWithOperate = await tapp.inject({ method: 'POST', url: '/api/visual-identity', headers: operate, payload: { profile: { ...LOCKED_PROFILE, face: 'looks like a famous actress' }, changeSummary: 'swap face' } });
     const approverHeaders = token(t, ['approve'], 'jatin');
     const spoofedReviewer = await decision(approverHeaders, { decision: 'APPROVE', reviewer: 'Chief Security Officer', acknowledgeWarnings: true });
-    const approved = await decision(approverHeaders, { decision: 'APPROVE', acknowledgeWarnings: true });
+    const withoutSecondFactor = await decision(approverHeaders, { decision: 'APPROVE', acknowledgeWarnings: true });
+    const approved = await decision({ ...approverHeaders, ...approvalCode() }, { decision: 'APPROVE', acknowledgeWarnings: true });
     const approvedBy = t.productions.get(tprod.productionId!).approvedBy;
-    record('RT-05d', 'Scoped credentials: operate cannot approve or change visual identity; approver is the credential principal', approveWithOperate.statusCode === 403 && identityWithOperate.statusCode === 403 && spoofedReviewer.statusCode === 400 && approvedBy === 'api:jatin' ? 'HELD' : 'VULNERABLE', {
+    record('RT-05d', 'Scoped credentials: operate cannot approve or change visual identity; approver is the credential principal', approveWithOperate.statusCode === 403 && identityWithOperate.statusCode === 403 && spoofedReviewer.statusCode === 400 && withoutSecondFactor.statusCode === 403 && approvedBy === 'api:jatin' ? 'HELD' : 'VULNERABLE', {
       withoutToken: unauth.statusCode,
       approveWithOperateToken: approveWithOperate.statusCode,
       visualIdentityWithOperateToken: identityWithOperate.statusCode,
       bodySuppliedReviewer: spoofedReviewer.statusCode,
-      approveWithApproveScope: approved.statusCode,
+      approveWithApproveScopeNoSecondFactor: withoutSecondFactor.statusCode,
+      approveWithApproveScopeAndCode: approved.statusCode,
       recordedApprovedBy: approvedBy,
       cliConfirmation: 'CLI approvals re-prompt for the production id on a TTY; non-interactive use requires --yes',
     });

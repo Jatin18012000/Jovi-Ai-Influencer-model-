@@ -93,6 +93,8 @@ interface PipelineDeps {
   strategy: StrategyService;
   planning: CreatorPlanningPipeline;
   prompts: PromptLibrary;
+  /** Re-audit N-04: null when `provider:model` may act as the safety reviewer. */
+  reviewerCalibration: (provider: string, model: string) => string | null;
   isSimulation: () => boolean;
   logger: Logger;
 }
@@ -126,7 +128,7 @@ export class CreativeProductionPipeline {
       script: new ScriptAgent(deps.prompts),
       storyboard: new StoryboardAgent(deps.prompts),
       visualPrompt: new VisualPromptAgent(deps.prompts),
-      safety: new SafetyReviewAgent(deps.prompts),
+      safety: new SafetyReviewAgent(deps.prompts, deps.reviewerCalibration),
       image: new ImageGenerationAgent(),
       video: new VideoGenerationAgent(),
       voice: new VoiceAgent(),

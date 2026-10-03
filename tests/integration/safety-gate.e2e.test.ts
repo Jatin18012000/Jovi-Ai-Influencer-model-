@@ -12,7 +12,7 @@ import { MockProvider } from '../../src/models/providers/mock-provider.js';
 import type { GenerateRequest } from '../../src/models/types.js';
 import { TestImageProvider, TestRenderProvider, TestVideoProvider, TestVoiceProvider } from '../fakes/fake-media.js';
 import { DIRECT_IDEA, LOCKED_PROFILE, VOICE_DURATIONS } from '../fakes/production-fixtures.js';
-import { createTestCore } from '../helpers.js';
+import { clearForMedia, createTestCore } from '../helpers.js';
 
 /**
  * Regression tests for security remediation R-02 (audit F-02): an independent
@@ -288,7 +288,10 @@ describe('R-02 MediaService chokepoint (independent of the pipeline)', () => {
     expect(stale.statusReason).toMatch(/^SAFETY_REVIEW_STALE/);
 
     await new Promise((r) => setTimeout(r, 5));
+    // Re-audit N-04: an ALLOW without a model verdict from a calibrated reviewer does not clear.
     core.productions.saveArtifact(id, 'SAFETY_REVIEW', { verdict: 'ALLOW', reasons: [] }, null, scope);
+    expect((await core.media.generateImage(job, scope)).statusReason).toMatch(/no model verdict/);
+    clearForMedia(core, id);
     const cleared = await core.media.generateImage(job, scope);
     expect(cleared).toMatchObject({ status: 'COMPLETED', provider: 'test-image' });
   });

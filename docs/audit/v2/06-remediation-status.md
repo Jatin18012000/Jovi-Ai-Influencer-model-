@@ -1,5 +1,7 @@
 # 06 — Re-audit Remediation Status (R2-01 … R2-09)
 
+> **Superseded in part by `07-final-remediation-status.md`:** N-04 now has a structural calibration gate, the N-06 residuals, N-09 and N-10 are closed, and API approvals need a second factor.
+
 Follow-up to `05-remediation-roadmap.md`. Branch `claude/busy-pascal-h6hvhh`, 2026-10-03. The commit and CI run are recorded in `docs/audit/13-security-gate.md` (gate history).
 
 Evidence:

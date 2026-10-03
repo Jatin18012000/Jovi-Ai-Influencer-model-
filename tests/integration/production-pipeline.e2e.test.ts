@@ -15,7 +15,7 @@ import { MockProvider } from '../../src/models/providers/mock-provider.js';
 import type { GenerateRequest, ModelProvider } from '../../src/models/types.js';
 import { EventType } from '../../src/types/enums.js';
 import { TestImageProvider, TestRenderProvider, TestVideoProvider, TestVoiceProvider } from '../fakes/fake-media.js';
-import { authedInject, bearer, createTestCore } from '../helpers.js';
+import { approvalCode, authedInject, bearer, createTestCore } from '../helpers.js';
 import { ALL_SCOPES } from '../../src/core/auth/api-credentials.js';
 
 /**
@@ -382,7 +382,7 @@ describe('Phase 8 API', () => {
       const gate = await inject({ method: 'GET', url: `/api/productions/${productionId}/publishing-gate` });
       expect(gate.json()).toMatchObject({ eligibleForHumanPublishing: false, autonomousPublishingAllowed: false });
 
-      const approve = await inject({ method: 'POST', url: `/api/productions/${productionId}/decision`, payload: { decision: 'APPROVE', acknowledgeWarnings: true } });
+      const approve = await inject({ method: 'POST', url: `/api/productions/${productionId}/decision`, headers: approvalCode(), payload: { decision: 'APPROVE', acknowledgeWarnings: true } });
       expect(approve.statusCode).toBe(409);
       expect((await inject({ method: 'POST', url: `/api/productions/${productionId}/decision`, payload: { decision: 'MAYBE' } })).statusCode).toBe(400);
       // The reviewer comes from the credential; a body-supplied reviewer is rejected.

@@ -103,7 +103,9 @@ describe('R-01 Host / Origin allow-list (DNS rebinding, RT-06)', () => {
     const call = (origin: string) => app.inject({ method: 'GET', url: '/api/agents', headers: { ...auth, origin } });
     expect((await call('http://evil.example')).statusCode).toBe(403);
     expect((await call('null')).statusCode).toBe(403);
-    expect((await call('http://localhost:5173')).statusCode).toBe(200);
+    // Re-audit N-09: a loopback origin must also use the API's own port (3000 by default).
+    expect((await call('http://localhost:3000')).statusCode).toBe(200);
+    expect((await call('http://localhost:5173')).statusCode).toBe(403);
     expect((await call('https://dashboard.jovi.example')).statusCode).toBe(200);
     expect((await call('https://dashboard.jovi.example.evil.com')).statusCode).toBe(403);
   });

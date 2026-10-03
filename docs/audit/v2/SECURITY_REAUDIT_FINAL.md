@@ -9,6 +9,8 @@
 | **Method** | 1. Fresh baseline (tests, typecheck, build, npm audit, gitleaks, SBOM, CI history, repository API). 2. Code review of the attack surface, focused on the ~2,200 lines of product code added by P0–P2 (excluding generated migration snapshots). 3. The original 27-check harness. 4. **10 new probes** written for this re-audit (`poc/reaudit-probes.mts`). 5. Re-verification of every original finding from evidence, not from remediation reports |
 | **Not testable** | Real LM Studio and safety-review behaviour; real ComfyUI and diffusion behaviour; browser-side DNS rebinding end to end; GitHub settings not exposed to this session (branch-protection read, security features) |
 
+> **Addendum, final remediation (same day).** `07-final-remediation-status.md`: the model safety reviewer may only act once calibrated on a labelled corpus (N-04 closed structurally; the owner's measurement run is the remaining condition). API approvals need a TOTP second factor, approvals check external audit anchors, and N-06, N-09 and N-10 are closed. Gate: CONDITIONAL PASS (C now PASS).
+>
 > **Addendum, remediation R2 (same day).** R2-01 … R2-09 were implemented afterwards (`06-remediation-status.md`). N-01, N-02, N-03, N-05, N-07, N-08, N-11 and N-12 are fixed, and N-06 is mitigated. **N-04 remains open:** on 12 held-out paraphrases the heuristics catch 1 (RA-11). The gate of record is now **CONDITIONAL PASS**, with J conditional on the owner's real-model measurement (R2-04). This report below is unchanged and describes the state at `3318a43`.
 
 > **Independence disclosure (F-24, now more acute).** The same AI system that performed the first audit also wrote every remediation (P0–P2) it is now re-auditing. The risk of self-confirmation is higher than before. Countermeasures:
@@ -25,6 +27,7 @@ Supporting documents in this folder:
 - `04-supply-chain-and-repository.md`
 - `05-remediation-roadmap.md`
 - `06-remediation-status.md` (added after R2)
+- `07-final-remediation-status.md` (added after the final remediation)
 - `redteam-results.json`
 - `reaudit-probe-results.json`
 - `reaudit-probe-results-after-r2.json`, `redteam-results-after-r2.json` (added after R2)

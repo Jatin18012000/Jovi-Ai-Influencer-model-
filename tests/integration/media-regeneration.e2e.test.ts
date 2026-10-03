@@ -8,7 +8,7 @@ import { ConflictError, ValidationError } from '../../src/core/errors.js';
 import { MediaStore } from '../../src/media/media-store.js';
 import { pngBytes, TestImageProvider, TestRenderProvider, TestVideoProvider, TestVoiceProvider } from '../fakes/fake-media.js';
 import { countingLocalModel, DIRECT_IDEA, LOCKED_PROFILE, VOICE_DURATIONS } from '../fakes/production-fixtures.js';
-import { authedInject, bearer, createTestCore } from '../helpers.js';
+import { approvalCode, authedInject, bearer, createTestCore } from '../helpers.js';
 import { ALL_SCOPES } from '../../src/core/auth/api-credentials.js';
 
 /**
@@ -192,7 +192,7 @@ describe('visual identity locking and Phase 9 API', () => {
       expect(regen.json()).toMatchObject({ productionStatus: 'AWAITING_HUMAN_APPROVAL', regenerations: 1 });
       expect((await inject({ method: 'POST', url: '/api/productions/prd_missing/regenerate-media', payload: {} })).statusCode).toBe(404);
 
-      const approve = await inject({ method: 'POST', url: `/api/productions/${productionId}/decision`, payload: { decision: 'APPROVE', acknowledgeWarnings: true } });
+      const approve = await inject({ method: 'POST', url: `/api/productions/${productionId}/decision`, headers: approvalCode(), payload: { decision: 'APPROVE', acknowledgeWarnings: true } });
       expect(approve.json().publishingGate).toMatchObject({ eligibleForHumanPublishing: true, autonomousPublishingAllowed: false });
       const again = await inject({ method: 'POST', url: `/api/productions/${productionId}/regenerate-media`, payload: {} });
       expect(again.statusCode).toBe(409);

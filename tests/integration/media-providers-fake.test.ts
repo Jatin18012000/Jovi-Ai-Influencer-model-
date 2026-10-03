@@ -171,6 +171,13 @@ describe('ElevenLabs adapter (fake ElevenLabs server)', () => {
     expect(JSON.stringify(result)).not.toContain('test-key');
   });
 
+  it('estimates cost per character when the owner configures the plan price (re-audit N-05)', async () => {
+    server = await startFakeElevenLabs();
+    expect((await provider({ usdPer1kChars: 0.3 }).synthesizeSpeech(voiceRequest('x'.repeat(2000)))).cost).toMatchObject({ estimatedApiCost: 0.6, executionCostType: 'API' });
+    // Unset: not estimated here; the cloud budget counts it at the unpriced worst case.
+    expect((await provider().synthesizeSpeech(voiceRequest())).cost.estimatedApiCost).toBeNull();
+  });
+
   it('classifies failures: 429 retryable, 400 permanent, and never leaks the key', async () => {
     server = await startFakeElevenLabs({ mode: 'rate_limited' });
     const limited = await provider().synthesizeSpeech(voiceRequest()).catch((e: unknown) => e);

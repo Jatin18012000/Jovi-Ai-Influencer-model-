@@ -92,14 +92,18 @@ export interface CredentialSummary {
 export class ApiCredentialService {
   private readonly envHash: Buffer | null;
 
+  /** Re-audit N-10: runtime-private, so in-process code cannot borrow the capability. */
+  readonly #attestation: EventAttestation | undefined;
+
   constructor(
     private readonly db: JoviDatabase,
     private readonly bus: EventBus,
     /** R-13: `previousToken` stays valid during a rollover of JOVI_API_TOKEN. */
     private readonly envToken: { token: string | undefined; previousToken?: string | undefined; previousTokenExpiresAt?: string | undefined; scopes: readonly ApiScope[] },
     /** R-08: credential events are protected (attested) events. */
-    private readonly attestation?: EventAttestation,
+    attestation?: EventAttestation,
   ) {
+    this.#attestation = attestation;
     this.envHash = envToken.token ? Buffer.from(hashToken(envToken.token), 'hex') : null;
     this.envPreviousHash = envToken.previousToken ? Buffer.from(hashToken(envToken.previousToken), 'hex') : null;
   }
@@ -160,7 +164,7 @@ export class ApiCredentialService {
   }
 
   private attested() {
-    return this.attestation ? { attestation: this.attestation } : {};
+    return this.#attestation ? { attestation: this.#attestation } : {};
   }
 
   list(): CredentialSummary[] {

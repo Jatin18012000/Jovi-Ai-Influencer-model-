@@ -71,18 +71,25 @@ export const VisualIdentityVersionInputSchema = z.object({
 export type VisualIdentityVersionInput = z.input<typeof VisualIdentityVersionInputSchema>;
 
 export class VisualIdentityService {
+  private readonly bus: EventBus | undefined;
+  /** Re-audit N-10: runtime-private capability for the attested version event. */
+  readonly #attestation: EventAttestation | undefined;
+
   constructor(
     private readonly db: JoviDatabase,
     private readonly identityId = 'jovi',
     /** Validates reference image paths (must be real files in the reference/media directories). */
     private readonly referenceCheck: (path: string) => boolean = () => true,
     /** R-08: the version event is a protected (attested) audit event emitted here, not by callers. */
-    private readonly audit?: { bus: EventBus; attestation: EventAttestation },
+    audit?: { bus: EventBus; attestation: EventAttestation },
     /** R-19 (D-19): the core identity's age (and names), so the visual identity cannot drift from it. */
     private readonly identityFacts?: () => { age: number; names: string[] },
     /** Re-audit R2-02: independent model review of human-entered anchors (fail-closed). */
     private readonly reviewer?: (anchors: string[]) => Promise<{ allow: boolean; reasons: string[] }>,
-  ) {}
+  ) {
+    this.bus = audit?.bus;
+    this.#attestation = audit?.attestation;
+  }
 
   /**
    * The entry point for humans (API and CLI). Runs the heuristic checks and
@@ -189,13 +196,13 @@ export class VisualIdentityService {
         .run();
     });
     const active = this.getActive();
-    this.audit?.bus.emit({
+    this.bus?.emit({
       eventType: 'VISUAL_IDENTITY_VERSION_CREATED',
       source: 'identity.visual',
       entityId: this.identityId,
       payload: { version: active.version, status: active.status, approvedBy, changeSummary },
       correlationId: newId('correlation'),
-      attestation: this.audit.attestation,
+      ...(this.#attestation ? { attestation: this.#attestation } : {}),
     });
     return active;
   }

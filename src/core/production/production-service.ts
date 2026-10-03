@@ -71,14 +71,23 @@ export const MediaRegenerationSchema = z.object({
 export type MediaRegenerationRequest = z.input<typeof MediaRegenerationSchema>;
 
 export class ProductionService {
+  private readonly audit: { bus: EventBus; anchors: ReadonlyArray<{ sequence: number; hash: string }> };
+  /** Re-audit N-10: runtime-private capability for the attested approval/rejection events. */
+  readonly #attestation: EventAttestation;
+
   constructor(
     private readonly db: JoviDatabase,
     private readonly assets: AssetService,
     /** R-08: approval/rejection events are attested; the publishing gate reconciles state with them. */
-    private readonly audit: { bus: EventBus; attestation: EventAttestation },
+    audit: { bus: EventBus; attestation: EventAttestation; anchors?: ReadonlyArray<{ sequence: number; hash: string }> },
+    /** Re-audit N-04: null when the reviewing `provider:model` holds a current, passing calibration. */
+    private readonly reviewerCalibration: (provider: string, model: string) => string | null,
     /** R-05: human-requested media regenerations allowed per production. */
     private readonly maxRegenerations = 5,
-  ) {}
+  ) {
+    this.audit = { bus: audit.bus, anchors: audit.anchors ?? [] };
+    this.#attestation = audit.attestation;
+  }
 
   create(
     input: {
@@ -157,17 +166,22 @@ export class ProductionService {
 
   /**
    * R-02: media may be generated for a production only with a current ALLOW
-   * safety review (newer than the visual prompts it reviewed). Returns the
+   * safety review (newer than the visual prompts it reviewed), given by a
+   * reviewer that is still calibrated (re-audit N-04). Returns the
    * refusal reason, or null when cleared.
    */
   safetyClearance(productionId: string): string | null {
-    const review = this.latestArtifact<{ verdict?: string; reasons?: string[] }>(productionId, 'SAFETY_REVIEW');
+    const review = this.latestArtifact<{ verdict?: string; reasons?: string[]; model?: { available?: boolean; provider?: string; model?: string } }>(productionId, 'SAFETY_REVIEW');
     if (!review) return 'SAFETY_REVIEW_REQUIRED: no pre-generation safety review exists for this production';
     if (review.verdict !== 'ALLOW') return `SAFETY_REVIEW_BLOCKED: ${(review.reasons ?? []).join('; ').slice(0, 300)}`;
     // Re-audit R2-09 (N-11): insertion order (rowid), not millisecond timestamps, decides staleness.
     const reviewed = this.latestArtifactOrder(productionId, 'SAFETY_REVIEW');
     const prompts = this.latestArtifactOrder(productionId, 'VISUAL_PROMPTS');
     if (prompts !== null && reviewed !== null && prompts > reviewed) return 'SAFETY_REVIEW_STALE: the visual prompts changed after the last review';
+    // Re-audit N-04: checked again at generation time, so a revoked or expired calibration stops further media.
+    if (!review.model?.available || !review.model.provider || !review.model.model) return 'SAFETY_REVIEW_BLOCKED: the review has no model verdict';
+    const calibration = this.reviewerCalibration(review.model.provider, review.model.model);
+    if (calibration) return calibration;
     return null;
   }
 
@@ -211,6 +225,14 @@ export class ProductionService {
 
     if (status !== 'AWAITING_HUMAN_APPROVAL') {
       throw new ConflictError(`Production in status ${status} cannot be approved (QA ${production.qaStatus ?? 'not run'})`);
+    }
+    // Gate C: no approval on top of an audit log that fails verification or no longer contains an externally recorded head.
+    const chain = this.audit.bus.verifyChain();
+    if (!chain.ok) throw new ConflictError(`Approval refused: the audit hash chain does not verify at #${chain.firstBreak?.sequence ?? '?'} (${chain.firstBreak?.reason ?? 'unknown'})`);
+    const anchors = this.audit.bus.verifyAnchors(this.audit.anchors);
+    if (!anchors.ok) {
+      const bad = anchors.results.filter((r) => r.status === 'MISMATCH' || r.status === 'MISSING').map((r) => `#${r.sequence} ${r.status}`);
+      throw new ConflictError(`Approval refused: the audit log no longer matches recorded anchors (${bad.join(', ')})`);
     }
     const qa = production.qaStatus as QAStatus | null;
     if (qa !== 'PASS' && qa !== 'PASS_WITH_WARNINGS') throw new ConflictError(`QA status ${qa ?? 'missing'} blocks approval`);
@@ -309,8 +331,8 @@ export class ProductionService {
     if (to === 'AWAITING_HUMAN_APPROVAL') scope.emit('CREATIVE_PRODUCTION_COMPLETED', SOURCE, id, { ...payload, qaStatus: current.qaStatus });
     if (to === 'BLOCKED') scope.emit('CREATIVE_PRODUCTION_BLOCKED', SOURCE, id, { ...payload, qaStatus: current.qaStatus });
     if (to === 'FAILED') scope.emit('CREATIVE_PRODUCTION_FAILED', SOURCE, id, { ...payload, error: fields.error ?? null });
-    if (to === 'APPROVED') scope.emit('PRODUCTION_APPROVED', SOURCE, id, { ...payload, reviewer: fields.approvedBy }, this.audit.attestation);
-    if (to === 'REJECTED') scope.emit('PRODUCTION_REJECTED', SOURCE, id, { ...payload, reviewer: fields.approvedBy }, this.audit.attestation);
+    if (to === 'APPROVED') scope.emit('PRODUCTION_APPROVED', SOURCE, id, { ...payload, reviewer: fields.approvedBy }, this.#attestation);
+    if (to === 'REJECTED') scope.emit('PRODUCTION_REJECTED', SOURCE, id, { ...payload, reviewer: fields.approvedBy }, this.#attestation);
     return this.get(id);
   }
 

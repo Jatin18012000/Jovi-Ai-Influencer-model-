@@ -14,7 +14,7 @@ This page records what Jovi trusts, why, and what limits that trust. It covers a
 | **Jovi code** (`src/`, `apps/`) | Trusted | First-party, reviewed, CI-tested | Agents get only a ToolKit. Every tool call is checked against the agent's allow-list and level, and recorded |
 | **Agents** | Trusted code, untrusted *output* | Models never choose tools: an agent's code calls them | Output is Zod-validated, guarded for identity and safety, and tag-escaped as data for the next agent |
 | **Model output** (LM Studio, cloud) | Untrusted data | Can be wrong, injected or adversarial | Treated only as data. Pre-generation safety gate (R-02); provenance labels (R-03); no execution path |
-| **API callers** | Authenticated, scoped | Bearer credentials | Scopes (read/operate/approve/identity-admin); Host/Origin allow-list; rate limits; audit events |
+| **API callers** | Authenticated, scoped | Bearer credentials | Scopes (read/operate/approve/identity-admin/audit); Host/Origin allow-list (origins on the API's port); rate limits; audit events; a TOTP second factor for approvals |
 | **CLI user** | Trusted (`local:<os user>`) | Shell access is the authentication | Interactive confirmation for approvals and identity changes |
 | **`.env` / environment** | Fully trusted | Operator configuration | Write access to `.env` means code execution (it names executables). Keep it owner-only (`chmod 600 .env`) |
 | **ffmpeg / ffprobe / `say`** | Trusted executables | Operator-installed | `shell: false`; arguments built from validated paths; text via stdin/SRT; timeouts; one log record per execution (R-08); **optional SHA-256 pins** |
@@ -55,12 +55,14 @@ How the pins behave:
 
 ## Residual risks (accepted, documented)
 
-- **In-process enforcement (F-19).** The permission guard is in-process, not a sandbox. It is sound because agents are first-party code and models never select tools. It would **not** contain a malicious third-party agent: never load agent code you have not reviewed.
+- **In-process enforcement (F-19).** The permission guard is in-process, not a sandbox. It is sound because agents are first-party code and models never select tools. It would **not** contain a malicious third-party agent: never load agent code you have not reviewed. Since the final remediation the attestation capability lives in ECMAScript `#private` fields, so in-process code cannot read it (N-10); code that can call the services directly is still trusted.
 - **Database write access.** A local attacker who can write `data/jovi.db` can:
   - append a fully re-hashed forged event to the end of the chain. Recording the chain head outside the machine detects this (runbook §6);
   - delete a prefix of the log behind a forged retention checkpoint. Since R2-03, a checkpoint must be vouched for by a chained `RETENTION_APPLIED` event, so a forgery needs a new event and changes the head (detected by anchoring).
 
   Approval attestation detects naive edits.
-- **Model independence (F-22).** With one local model, the generator, the evaluator, the QA model and the safety reviewer are the same model. The reviews are a second *pass*, not a second *opinion*. Configure a second provider for independent evaluation where it matters.
+- **Model independence (F-22).** With one local model, the generator, the evaluator, the QA model and the safety reviewer are the same model. The reviews are a second *pass*, not a second *opinion*. `JOVI_SAFETY_REVIEW_MODEL` pins the safety reviewer to a different model when one is available; the reviewer must in any case pass calibration (runbook §7).
 - **ComfyUI.** Workflows and custom nodes execute arbitrary code inside ComfyUI. Jovi treats ComfyUI as part of the trusted computing base.
-- **Heuristic checks.** Identity, safety and likeness patterns are heuristics (labelled `HEURISTIC` in QA). The model-graded safety review and the human approval are the controls that count.
+- **Heuristic checks.** Identity, safety and likeness patterns are heuristics (labelled `HEURISTIC` in QA); on held-out paraphrases they catch 1 of 12 (RA-11). The controls that count are the model-graded safety review, which may only act once calibrated on a labelled corpus (N-04), and the human approval.
+- **Calibration is a measurement, not a guarantee.** A reviewer that passes the corpus can still miss phrasing the corpus does not cover. Human approval remains the final control, and the corpus should grow with every miss found in practice.
+- **Media files.** Reads refuse symlinks and hard links, verify device and inode, and give ffmpeg/ffprobe private copies. A local user who can write the media directory can still replace a file before Jovi first hashes it.

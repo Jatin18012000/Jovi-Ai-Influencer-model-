@@ -27,10 +27,11 @@ Use either GitHub → *Settings → Rules → Rulesets → New branch ruleset* (
 
 Turn on:
 - **Require a pull request before merging**, with at least 1 approval. Dismiss stale approvals when new commits are pushed.
-- **Require status checks to pass:** select these three CI jobs. They appear after the workflow has run once.
+- **Require status checks to pass:** select these four CI jobs. They appear after the workflow has run once.
   - `Typecheck, test, build`
   - `Dependency audit + SBOM`
   - `Secret scan (gitleaks, full history)`
+  - `Container (hardened compose)`
 - **Require branches to be up to date before merging.**
 - **Block force pushes** and **restrict deletions**.
 - **Require linear history** (optional).
@@ -45,7 +46,7 @@ gh api -X PUT repos/jatin18012000/jovi-ai-influencer-model-/branches/main/protec
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["Typecheck, test, build", "Dependency audit + SBOM", "Secret scan (gitleaks, full history)"]
+    "contexts": ["Typecheck, test, build", "Dependency audit + SBOM", "Secret scan (gitleaks, full history)", "Container (hardened compose)"]
   },
   "enforce_admins": true,
   "required_pull_request_reviews": { "required_approving_review_count": 1, "dismiss_stale_reviews": true },
@@ -101,4 +102,25 @@ The event log is hash-chained. Someone with write access to `data/jovi.db` can s
 
 A later head that does not extend a recorded one means the log was rewritten.
 
+To make this automatic, put the recorded heads in `.env` as `JOVI_AUDIT_ANCHORS=1234:<hash>,5678:<hash>`. Every approval then verifies the whole chain and refuses (409) if any anchored event is missing or has a different hash. `npm run jovi -- --audit-verify --expect-head <sequence:hash>` checks one head ad hoc and exits 2 on a mismatch. After applying event retention, record a new head: anchors older than the retention checkpoint can no longer be compared and are reported as `PRUNED`.
+
 > **Prefix deletion (re-audit N-03, fixed by R2-03).** A retention checkpoint is now accepted only when a later, chain-verified `RETENTION_APPLIED` event records the same `{sequence, hash}`. Forging one would mean inserting an event, which changes the head, and anchoring detects that. Anchoring the head therefore covers both tail rewrites and prefix deletion.
+
+## 7. Calibrate the safety reviewer (re-audit N-04, required before real media)
+
+The pre-generation safety review clears media only if its model has been **measured**. Until then, every production with a real model stops `BLOCKED` with `SAFETY_REVIEW_NOT_CALIBRATED`, and visual-identity changes are refused.
+
+1. Start LM Studio with the reviewer model loaded (currently `google/gemma-4-12b-qat` at `http://localhost:1234/v1`). Optionally pin it so no other model reviews: `JOVI_SAFETY_REVIEW_MODEL=lmstudio:google/gemma-4-12b-qat`. A reviewer different from the generator gives an independent second opinion (F-22).
+2. Run `npm run jovi -- --safety-eval`. It sends each of the 119 labelled cases in `prompts/production/safety-eval-corpus.json` through the deployed reviewer (no media is generated) and prints recall, the false-block rate and every miss.
+3. **PASSED:** the reviewer may clear media for 30 days (`JOVI_SAFETY_CALIBRATION_MAX_AGE_DAYS`), for this model, prompt, rubric and corpus only. **FAILED:** productions stay blocked. Try a stronger reviewer model, then re-run. Do not lower `JOVI_SAFETY_EVAL_MIN_RECALL` below what you are willing to rely on (it cannot go below 0.9).
+4. Commit the printed result to `docs/audit/` as the R2-04 measurement record. `npm run jovi -- --safety-status` shows the current state.
+
+Changing the corpus, the safety prompt or the rubric invalidates every calibration. Never copy corpus cases into the heuristic guard: the RA-11 cases are the held-out check of the heuristics.
+
+## 8. Second factor for API approvals (Gate C)
+
+1. `npm run jovi -- --approval-totp-setup` prints a new secret and an `otpauth://` URI. Add it to an authenticator app.
+2. Put `JOVI_APPROVAL_TOTP_SECRET=<secret>` in `.env` (`chmod 600 .env`) and restart the API.
+3. Send the current 6-digit code as the `X-Jovi-Approval-Code` header with every API `APPROVE`. Rejections need no code. CLI approvals are unaffected (local account plus typed confirmation).
+
+Without the secret, API approvals are refused.

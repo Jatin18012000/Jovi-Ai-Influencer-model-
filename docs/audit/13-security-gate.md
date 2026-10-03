@@ -1,6 +1,51 @@
 # 13 — Security Gate
 
-## Current gate — after re-audit remediation R2 (2026-10-03)
+## Current gate — after the final remediation (2026-10-03)
+
+Source: `docs/audit/v2/07-final-remediation-status.md`.
+
+Evidence:
+- Probes: 14 HELD, 1 INFO (`reaudit-probe-results-final.json`).
+- Original harness: 27/27 HELD (`redteam-results-final.json`).
+- Test suite: 314 passed, 9 skipped (real providers).
+
+| Gate | Result | Basis |
+|---|---|---|
+| **A** | **PASS** | No Critical or High findings open |
+| **B** | **PASS** | Origins also bound to the API port (N-09, RA-09). Approvals need a second factor |
+| **C** | **PASS** | No publishing path. Approvals need an `approve` credential **plus a TOTP code** (RA-13), are attested, and are refused unless the whole chain verifies and every recorded anchor matches (RA-14). *Before Phase 10 (process, not code):* an independent human review of the publishing design |
+| **D** | **PASS** | Unchanged |
+| **E** | **PASS** | Unchanged |
+| **F** | **PASS** | Hard links refused; ffprobe reads a private copy (RA-15) |
+| **G** | **PASS** | Unchanged |
+| **H** | **PASS** | 0 runtime advisories. Dev toolchain upgraded with the root cause of Dependabot PR #2 fixed |
+| **I** | **PASS** | Unchanged |
+| **J** | **CONDITIONAL PASS** | **Structurally closed:** no real reviewer can clear media until it has been measured on the labelled corpus (RA-12); negative prompts are code-only (RA-01); anchors are reviewed (RA-02). *Condition:* the owner's measurement run (R2-04). Until it passes, real productions stop BLOCKED, so the system is **safe by default** but not yet usable for real media |
+| **K** | **PASS** | Calibration records are protected, chained events. N-10 closed (`#private` capability, RA-10) |
+| **L** | **CONDITIONAL PASS** | Controls work (CI with 4 jobs). *Condition:* the repository is public, with no protected branch (R2-08, owner) |
+
+**Overall gate verdict: CONDITIONAL PASS.** Every condition left is an owner action:
+1. **R2-04:** `npm run jovi -- --safety-eval` passes on the owner's reviewer model (J). Until then real media generation is blocked by design.
+2. **R2-08:** protected `main` with the four CI checks (L).
+3. **Before Phase 10:** an independent human security review.
+
+**CSO answer:** once 1 and 2 are done, **yes for attended, human-approved local production**. **No** for unattended production and Phase 10 publishing until 3 is done.
+
+### Gate history
+
+| Evaluation | Commit | Verdict | Failing gates |
+|---|---|---|---|
+| First audit | `eaf487c` | FAIL | B, I, J, L |
+| After P0 (`14`) | `35802ca` | FAIL | L |
+| After P1 (`15`) | `67a4783` | CONDITIONAL PASS | — |
+| After P2 (`16`) | `09ba05e` | CONDITIONAL PASS | — |
+| Re-audit (v2) | `3318a43` | FAIL | J (new evidence: N-01, N-04) |
+| Re-audit remediation (R2) (`v2/06`) | `7a57d1c` | CONDITIONAL PASS | — (J conditional on R2-04) |
+| **Final remediation** (`v2/07`) | this commit | **CONDITIONAL PASS** | — (J and L conditional on owner steps; C passes) |
+
+---
+
+## Previous gate — after re-audit remediation R2 (historical)
 
 Source: `docs/audit/v2/06-remediation-status.md`.
 
@@ -32,17 +77,6 @@ Conditions, in order:
 3. **Before Phase 10:** external anchoring, an API approval second factor and an independent human security review (C).
 
 **CSO answer:** **not yet for production.** Once conditions 1 and 2 are met: **conditionally yes for attended, human-approved local production**. **No** for unattended production and Phase 10 publishing until condition 3 is met.
-
-### Gate history
-
-| Evaluation | Commit | Verdict | Failing gates |
-|---|---|---|---|
-| First audit | `eaf487c` | FAIL | B, I, J, L |
-| After P0 (`14`) | `35802ca` | FAIL | L |
-| After P1 (`15`) | `67a4783` | CONDITIONAL PASS | — |
-| After P2 (`16`) | `09ba05e` | CONDITIONAL PASS | — |
-| Re-audit (v2) | `3318a43` | FAIL | J (new evidence: N-01, N-04) |
-| **Re-audit remediation (R2)** (`v2/06`) | this commit | **CONDITIONAL PASS** | — (J conditional on R2-04) |
 
 ---
 

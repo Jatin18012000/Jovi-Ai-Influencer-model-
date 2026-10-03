@@ -126,11 +126,14 @@ npm run jovi -- --regenerate-media <productionId> [--kinds IMAGE,VOICE] [--inclu
                                                             # HUMAN: redo media (text reused), re-edit, re-QA
 npm run jovi -- --visual-identity                           # active visual identity + versions
 npm run jovi -- --set-visual-identity profile.json --summary "<why>" [--yes]   # HUMAN: lock appearance (retype "identity")
-npm run jovi -- --api-token create --name <name> --scopes read,operate[,approve,identity-admin]   # token shown once
+npm run jovi -- --api-token create --name <name> --scopes read,operate[,approve,identity-admin,audit]   # token shown once
 npm run jovi -- --api-token list | --api-token revoke --name <name>
 npm run jovi -- --api-token create --name ci --scopes read --expires-days 30   # optional expiry
 npm run jovi -- --api-token rotate --name n8n [--grace-days 7]                 # new token; old one valid for the grace period
-npm run jovi -- --audit-verify                              # verify the event hash chain; prints the head hash
+npm run jovi -- --audit-verify [--expect-head <seq:hash>]   # verify the event hash chain (and recorded heads); prints the head
+npm run jovi -- --safety-eval                               # calibrate the safety reviewer on the labelled corpus (required before real media)
+npm run jovi -- --safety-status                             # calibration status of each available reviewer model
+npm run jovi -- --approval-totp-setup                       # second-factor secret for API approvals
 npm run jovi -- --retention [--dry-run]                     # apply data retention (runs; events only if enabled)
 npm run jovi -- --backup ~/Backups/jovi.db                  # online SQLite backup (0600, never overwrites)
 npm run jovi -- --media-gc [--dry-run] [--older-than-days 7] # delete files of SUPERSEDED media (records kept)
@@ -181,8 +184,8 @@ Every route except `/health` requires `Authorization: Bearer <token>` with the r
 
 ## Security
 
-- **Authentication is mandatory** (security remediation R-01/R-04, see `docs/audit/14-p0-remediation-status.md`). Credentials are 256-bit `jovi_…` tokens stored as SHA-256 hashes in `api_credentials`, each with scopes `read` / `operate` / `approve` / `identity-admin`, revocable by name (names are never reused). An optional `JOVI_API_TOKEN` (≥ 32 characters) is an operator token with `JOVI_API_TOKEN_SCOPES` (default `read,operate`). Who approved, regenerated or changed visual identity is always the authenticated principal.
-- **Host/Origin allow-list:** `localhost`, `127.0.0.1`, `::1`, the bind host and `JOVI_ALLOWED_HOSTS`; browser `Origin`s must use one of those hosts or be listed in `JOVI_ALLOWED_ORIGINS`. Responses carry `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, a deny-all CSP and `Cache-Control: no-store`.
+- **Authentication is mandatory** (security remediation R-01/R-04, see `docs/audit/14-p0-remediation-status.md`). Credentials are 256-bit `jovi_…` tokens stored as SHA-256 hashes in `api_credentials`, each with scopes `read` / `operate` / `approve` / `identity-admin` / `audit`, revocable by name (names are never reused). An optional `JOVI_API_TOKEN` (≥ 32 characters) is an operator token with `JOVI_API_TOKEN_SCOPES` (default `read,operate`). Who approved, regenerated or changed visual identity is always the authenticated principal.
+- **Host/Origin allow-list:** `localhost`, `127.0.0.1`, `::1`, the bind host and `JOVI_ALLOWED_HOSTS`; browser `Origin`s must use one of those hosts on the API's own port, or be listed in `JOVI_ALLOWED_ORIGINS`. Responses carry `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, a deny-all CSP and `Cache-Control: no-store`.
 - **Bind guard:** a non-loopback `HOST` requires `JOVI_ALLOW_NETWORK_BIND=true` and logs a plain-HTTP warning (put TLS in front). Expensive endpoints are rate limited per client (`JOVI_GOAL_RATE_LIMIT_PER_MINUTE`) and capped in concurrency (`JOVI_MAX_CONCURRENT_GOALS`).
 - **Resource limits** (R-05):
   - Async jobs keep holding their concurrency slot until they finish, so `"mode": "async"` cannot bypass `JOVI_MAX_CONCURRENT_GOALS`.
@@ -217,6 +220,11 @@ Every route except `/health` requires `Authorization: Bearer <token>` with the r
   - The owner token goes to `data/owner-token` (0600), never to the logs.
   - The event log needs the `audit` scope, and asset paths are returned relative.
   - The rollover token needs an expiry date.
+- **Final remediation** (`docs/audit/v2/07-final-remediation-status.md`):
+  - **Calibrated safety reviewer (N-04):** a real reviewer model clears media generation (and visual-identity changes) only after `npm run jovi -- --safety-eval` measured it on the labelled corpus (`prompts/production/safety-eval-corpus.json`) at recall ≥ `JOVI_SAFETY_EVAL_MIN_RECALL` (default 0.95, floor 0.9) and a false-block rate ≤ 0.25. The result is a protected, hash-chained event, valid for 30 days and only for the same model, prompt, rubric and corpus. Simulation is exempt. `JOVI_SAFETY_REVIEW_MODEL` pins the reviewer to one model (F-22).
+  - **Second factor for API approvals:** `APPROVE` via the API needs a current TOTP code (`X-Jovi-Approval-Code`, secret `JOVI_APPROVAL_TOTP_SECRET`); codes are single-use per production, and five wrong codes lock approvals for 15 minutes. Without a secret, API approvals are refused (the CLI still works).
+  - **Audit anchors:** approvals verify the whole hash chain and every head in `JOVI_AUDIT_ANCHORS`; `--audit-verify --expect-head` checks one ad hoc.
+  - Browser origins must use the API's port; hard-linked media files are refused; ffprobe reads a private copy; the attestation capability is in ECMAScript `#private` fields; ElevenLabs cost can be estimated per character.
 - **Supply chain** (R-07): `.github/workflows/ci.yml` runs typecheck, tests, build, `npm audit`, osv-scanner, a gitleaks scan of the full history and an SBOM artifact. It uses a read-only token, SHA-pinned actions and checksum-verified scanners. Dependabot covers npm, actions and the Docker base image, which is pinned by digest. Branch protection is an owner step: see `docs/security/sdlc-runbook.md`.
 - **Pre-generation safety gate** (R-02): after the visual prompts and before **any** media request, the `safety-review` agent runs the identity/safety heuristics and an independent model review against a fixed rubric (adult only, AI transparency, identity consistency, no real-person likeness, platform safety). Anything but a full ALLOW — including a model error or invalid output — is `BLOCK` (fail-closed) and the production stops `BLOCKED`. `MediaService` independently refuses to call a provider without a current ALLOW review (`SAFETY_REVIEW_REQUIRED` / `_BLOCKED` / `_STALE`). Pattern checks are labelled `HEURISTIC` in QA: they are not proof of compliance.
 - **Enforced permissions:** agents receive no services — only a per-run **ToolKit** whose every method checks the agent's allow-list and level (capped at `JOVI_MAX_PERMISSION_LEVEL`). Every call, allowed or denied, is stored in `agent_runs.tool_calls`. There are no shell, filesystem, credential, publishing or infrastructure tools. Executive = `LEVEL_2_MODIFY`. Artifact writes are scoped per kind (`production.write:SCRIPT`, …, `production.write:QA_REPORT`), so only the QA agent can record a QA verdict (R-10).

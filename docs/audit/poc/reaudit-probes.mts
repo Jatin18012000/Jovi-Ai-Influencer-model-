@@ -14,7 +14,7 @@
  *   PARTIAL     the control works only in part
  *   INFO        evidence; no pass/fail semantics
  */
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -35,6 +35,7 @@ import { MockProvider } from '../../../src/models/providers/mock-provider.js';
 import type { GenerateRequest } from '../../../src/models/types.js';
 import { TestImageProvider, TestRenderProvider, TestVideoProvider, TestVoiceProvider } from '../../../tests/fakes/fake-media.js';
 import { DIRECT_IDEA, LOCKED_PROFILE, VOICE_DURATIONS } from '../../../tests/fakes/production-fixtures.js';
+import { approvalCode, calibrateReviewer, TEST_TOTP_SECRET } from '../../../tests/helpers.js';
 
 type Status = 'HELD' | 'VULNERABLE' | 'PARTIAL' | 'INFO';
 const results: Array<{ id: string; title: string; status: Status; evidence: unknown }> = [];
@@ -55,9 +56,24 @@ function textModel(override: (r: GenerateRequest) => unknown = () => undefined) 
   });
 }
 
-async function core(env: Record<string, string> = {}, opts: { model?: MockProvider; media?: AnyMediaProvider[]; logger?: pino.Logger } = {}): Promise<JoviCore> {
-  const config = loadConfig({ DATABASE_URL: ':memory:', JOVI_LOG_LEVEL: 'silent', JOVI_JOB_BACKOFF_MS: '0', LM_STUDIO_ENABLED: 'false', JOVI_MEDIA_DIR: join(root, 'media'), JOVI_REFERENCE_DIR: join(root, 'references'), ...env });
-  return createJoviCore({ config, providers: [opts.model ?? textModel()], sleep: async () => {}, ...(opts.media ? { mediaProviders: opts.media } : {}), ...(opts.logger ? { logger: opts.logger as never } : {}) });
+async function core(
+  env: Record<string, string> = {},
+  opts: { model?: MockProvider; media?: AnyMediaProvider[]; logger?: pino.Logger; calibrate?: boolean } = {},
+): Promise<JoviCore> {
+  const config = loadConfig({
+    DATABASE_URL: ':memory:',
+    JOVI_LOG_LEVEL: 'silent',
+    JOVI_JOB_BACKOFF_MS: '0',
+    LM_STUDIO_ENABLED: 'false',
+    JOVI_MEDIA_DIR: join(root, 'media'),
+    JOVI_REFERENCE_DIR: join(root, 'references'),
+    JOVI_APPROVAL_TOTP_SECRET: TEST_TOTP_SECRET,
+    ...env,
+  });
+  const c = await createJoviCore({ config, providers: [opts.model ?? textModel()], sleep: async () => {}, ...(opts.media ? { mediaProviders: opts.media } : {}), ...(opts.logger ? { logger: opts.logger as never } : {}) });
+  // N-04: the test model counts as a measured reviewer unless a probe targets the calibration gate itself (RA-12).
+  if (opts.calibrate !== false) await calibrateReviewer(c, 'local-x', 'local-x');
+  return c;
 }
 function media() {
   const store = new MediaStore(join(root, 'media'), join(root, 'references'));
@@ -312,9 +328,10 @@ async function main() {
     const r = await c.production.start({ idea: DIRECT_IDEA });
     const assets = await app.inject({ method: 'GET', url: `/api/productions/${r.productionId}/assets`, headers: read });
     const location = (assets.json() as { assets: Array<{ location: string | null }> }).assets.find((a) => a.location)?.location ?? '';
-    record('RA-09', 'Browser Origins from any port on an allowed host are accepted; read-scope responses disclose absolute media paths', 'INFO', {
+    const ownPort = await app.inject({ method: 'GET', url: '/api/agents', headers: { ...read, origin: 'http://localhost:3000' } });
+    record('RA-09', 'Browser Origins from any port on an allowed host are accepted; read-scope responses disclose absolute media paths', otherPort.statusCode === 403 && !location.startsWith('/') ? 'HELD' : 'VULNERABLE', {
       originLocalhost9999: otherPort.statusCode,
-      originNote: 'still needs a bearer token, and JSON/Authorization requests need a CORS preflight that is refused',
+      originOwnPort3000: ownPort.statusCode,
       assetLocationExample: location.replace(root, '<tmp>'),
       absolutePathDisclosed: location.startsWith('/'),
     });
@@ -323,21 +340,131 @@ async function main() {
   }
 
   // ---------------------------------------------------------------------------
+  // RA-12 Unmeasured safety reviewer (N-04 structural gate)
+  // ---------------------------------------------------------------------------
+  {
+    const m = media();
+    const c = await core({}, { media: m.all, calibrate: false });
+    c.visualIdentity.createVersion(LOCKED_PROFILE, 'human:art-director', 'lock');
+    const r = await c.production.start({ idea: DIRECT_IDEA });
+    const review = c.productions.latestArtifact<{ verdict: string; reasons: string[] }>(r.productionId!, 'SAFETY_REVIEW');
+    let forged = 'EMITTED';
+    try {
+      c.events.emit({ eventType: 'SAFETY_CALIBRATION_RECORDED', source: 'safety.calibration', entityId: 'local-x:local-x', payload: { passed: true, recall: 1, falseBlockRate: 0 } });
+    } catch (e) {
+      forged = (e as Error).name;
+    }
+    // A local database writer inserting an unchained "passing" record.
+    c.database.sqlite
+      .prepare("INSERT INTO events (id, event_type, timestamp, source, entity_id, payload, schema_version, correlation_id, causation_id, sequence) VALUES ('evt_forged', 'SAFETY_CALIBRATION_RECORDED', '2026-10-03T00:00:00.000Z', 'safety.calibration', 'local-x:local-x', ?, 1, NULL, NULL, 999999)")
+      .run(JSON.stringify({ passed: true, recall: 1, falseBlockRate: 0, measuredAt: new Date().toISOString() }));
+    const afterSqlForgery = c.safetyCalibration.status('local-x', 'local-x');
+    const blocked = r.productionStatus === 'BLOCKED' && m.image.calls.length === 0 && /SAFETY_REVIEW_NOT_CALIBRATED/.test(review?.reasons.join(' ') ?? '');
+    record('RA-12', 'An unmeasured (uncalibrated) safety reviewer clears media generation', blocked && forged === 'PermissionDeniedError' && afterSqlForgery !== null ? 'HELD' : 'VULNERABLE', {
+      productionStatus: r.productionStatus,
+      imageRequests: m.image.calls.length,
+      reason: review?.reasons.find((x) => x.includes('NOT_CALIBRATED')),
+      forgedCalibrationViaBus: forged,
+      afterSqlForgery,
+      note: 'Measures the gate, not model quality: real recall comes from `npm run jovi -- --safety-eval` on the owner model (R2-04)',
+    });
+    await c.close();
+  }
+
+  // ---------------------------------------------------------------------------
+  // RA-13 Stolen approve-scoped token without the second factor (Gate C)
+  // ---------------------------------------------------------------------------
+  {
+    const m = media();
+    const c = await core({}, { media: m.all });
+    c.visualIdentity.createVersion(LOCKED_PROFILE, 'human:art-director', 'lock');
+    const r = await c.production.start({ idea: DIRECT_IDEA });
+    const app = buildApiServer(c);
+    const stolen = bearer(c, ['approve']);
+    const approve = (headers: Record<string, string>) =>
+      app.inject({ method: 'POST', url: `/api/productions/${r.productionId}/decision`, headers: { ...stolen, ...headers }, payload: { decision: 'APPROVE', acknowledgeWarnings: true } });
+    const noCode = await approve({});
+    const guesses: number[] = [];
+    for (let i = 0; i < 6; i++) guesses.push((await approve({ 'x-jovi-approval-code': String(100000 + i) })).statusCode);
+    const afterLockoutWithValidCode = await approve(approvalCode());
+    record('RA-13', 'A stolen approve-scoped bearer token alone approves a production', [noCode.statusCode, ...guesses, afterLockoutWithValidCode.statusCode].includes(200) ? 'VULNERABLE' : 'HELD', {
+      productionStatus: r.productionStatus,
+      noCode: noCode.statusCode,
+      wrongCodes: guesses,
+      validCodeDuringLockout: afterLockoutWithValidCode.statusCode,
+      approvalCodeRefusalsAudited: c.events.list({ eventType: 'API_AUTH_FAILED' }).filter((e) => e.payload.reason === 'APPROVAL_CODE_REFUSED').length,
+    });
+    await app.close();
+    await c.close();
+  }
+
+  // ---------------------------------------------------------------------------
+  // RA-14 Approval on a rewritten audit log (external anchors, Gate C)
+  // ---------------------------------------------------------------------------
+  {
+    const c = await core({ JOVI_AUDIT_ANCHORS: `1:${'a'.repeat(64)}` }, { media: media().all });
+    c.visualIdentity.createVersion(LOCKED_PROFILE, 'human:art-director', 'lock');
+    const r = await c.production.start({ idea: DIRECT_IDEA });
+    let outcome = 'APPROVED';
+    try {
+      c.productions.recordHumanDecision(r.productionId!, { decision: 'APPROVE', reviewer: 'local:probe', acknowledgeWarnings: true }, c.events.scope(r.correlationId));
+    } catch (e) {
+      outcome = `${(e as Error).name}: ${(e as Error).message.slice(0, 160)}`;
+    }
+    record('RA-14', 'A production can be approved on top of an audit log that no longer contains an externally recorded head', outcome === 'APPROVED' ? 'VULNERABLE' : 'HELD', {
+      productionStatus: r.productionStatus,
+      outcome,
+    });
+    await c.close();
+  }
+
+  // ---------------------------------------------------------------------------
+  // RA-15 Hard link into the media store (N-06 residual)
+  // ---------------------------------------------------------------------------
+  {
+    const store = new MediaStore(join(root, 'media'), join(root, 'references'));
+    const pid = newId('production');
+    mkdirSync(join(root, 'media', pid), { recursive: true });
+    const secret = join(root, 'outside-secret.png');
+    writeFileSync(secret, Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489', 'hex'));
+    const linked = join(root, 'media', pid, 'linked.png');
+    linkSync(secret, linked);
+    let read = 'READ';
+    try {
+      store.readInput(linked);
+    } catch (e) {
+      read = (e as Error).message.slice(0, 120);
+    }
+    record('RA-15', 'A hard link inside the media store exposes a file from outside it', read === 'READ' ? 'VULNERABLE' : 'HELD', { readInput: read, precondition: 'local write access to the media directory' });
+  }
+
+  // ---------------------------------------------------------------------------
   // RA-10 In-process capability theft (trust boundary F-19)
   // ---------------------------------------------------------------------------
   {
     const c = await core();
-    const stolen = (c.productions as unknown as { audit: { attestation: never } }).audit.attestation;
-    let emitted = 'REFUSED';
-    try {
-      c.events.emit({ eventType: 'PRODUCTION_APPROVED', source: 'production', entityId: 'prd_x', payload: { reviewer: 'nobody' }, attestation: stolen });
-      emitted = 'EMITTED';
-    } catch (e) {
-      emitted = (e as Error).name;
+    // Every place the capability used to be reachable through TypeScript-only `private` fields.
+    const loose = (o: unknown) => o as Record<string, Record<string, unknown> | undefined>;
+    const candidates: Record<string, unknown> = {
+      'productions.audit.attestation': loose(c.productions).audit?.attestation,
+      'events.attestation': loose(c.events).attestation,
+      'credentials.attestation': loose(c.credentials).attestation,
+      'visualIdentity.audit.attestation': loose(c.visualIdentity).audit?.attestation,
+      'safetyCalibration.attestation': loose(c.safetyCalibration).attestation,
+    };
+    const outcomes: Record<string, string> = {};
+    for (const [path, stolen] of Object.entries(candidates)) {
+      try {
+        c.events.emit({ eventType: 'PRODUCTION_APPROVED', source: 'production', entityId: 'prd_x', payload: { reviewer: 'nobody' }, attestation: stolen as never });
+        outcomes[path] = 'EMITTED';
+      } catch (e) {
+        outcomes[path] = (e as Error).name;
+      }
     }
-    record('RA-10', 'In-process code can read the attestation capability from a service and emit protected events', 'INFO', {
-      result: emitted,
-      note: 'Expected under the documented trust model (F-19): agents and models cannot reach services; only first-party in-process code can. TypeScript `private` is not a runtime boundary',
+    const emitted = Object.values(outcomes).includes('EMITTED');
+    record('RA-10', 'In-process code can read the attestation capability from a service and emit protected events', emitted ? 'VULNERABLE' : 'HELD', {
+      outcomes,
+      note: 'Since the final remediation the capability lives in ECMAScript #private fields (not reachable at runtime). Code that can call the services directly is still trusted (F-19): it could, for example, call recordHumanDecision itself',
     });
     await c.close();
   }

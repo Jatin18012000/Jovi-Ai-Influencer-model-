@@ -1,9 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
+import { routedSafetyReviewer } from '../../src/agents/production/model-safety-review.js';
 import { localPrincipal, parseScopes } from '../../src/core/auth/api-credentials.js';
+import { generateTotpSecret, otpauthUri } from '../../src/core/auth/totp.js';
 import { createJoviCore, type JoviCore } from '../../src/core/bootstrap.js';
-import { loadConfig } from '../../src/core/config/config.js';
+import { loadConfig, parseAuditAnchors } from '../../src/core/config/config.js';
 import { loadEnvFile } from '../../src/core/config/load-env.js';
 import { createLogger } from '../../src/core/config/logger.js';
 import { newId } from '../../src/core/ids.js';
@@ -33,13 +35,18 @@ Usage:
   npm run jovi -- --visual-identity         Show Jovi's active visual identity and its versions
   npm run jovi -- --set-visual-identity <profile.json> --summary "<why>" [--yes]
                                             HUMAN action: record a new visual identity version (LOCKED when all anchors are set)
-  npm run jovi -- --api-token create --name <name> --scopes read,operate[,approve,identity-admin]
+  npm run jovi -- --api-token create --name <name> --scopes read,operate[,approve,identity-admin,audit]
                                             Create an API credential (token shown once; only its hash is stored)
   npm run jovi -- --api-token create ... [--expires-days N]   Optional expiry
   npm run jovi -- --api-token rotate --name <name> [--grace-days 7]
                                             New token with the same scopes; the old one stays valid for the grace period
   npm run jovi -- --api-token list | --api-token revoke --name <name>
-  npm run jovi -- --audit-verify            Verify the event hash chain; prints the head hash to record elsewhere
+  npm run jovi -- --audit-verify [--expect-head <sequence:hash>]
+                                            Verify the event hash chain (and recorded heads); prints the head to record elsewhere
+  npm run jovi -- --safety-eval             Calibrate the safety reviewer: run the labelled corpus through the deployed
+                                            reviewer and record recall / false blocks (required before real media generation)
+  npm run jovi -- --safety-status           Show the calibration status of each available reviewer model
+  npm run jovi -- --approval-totp-setup     Generate a TOTP secret for API approvals (second factor)
   npm run jovi -- --retention [--dry-run]   Apply data retention (agent/model runs; events only if JOVI_EVENT_RETENTION_DAYS > 0)
   npm run jovi -- --backup <file.db>        Online SQLite backup (owner-only file; never overwrites)
   npm run jovi -- --media-gc [--dry-run] [--older-than-days 7]
@@ -88,12 +95,34 @@ async function main(): Promise<number> {
       retention: { type: 'boolean', default: false },
       backup: { type: 'string' },
       'grace-days': { type: 'string' },
+      'expect-head': { type: 'string' },
+      'safety-eval': { type: 'boolean', default: false },
+      'safety-status': { type: 'boolean', default: false },
+      'approval-totp-setup': { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
 
   if (values.help) {
     process.stdout.write(USAGE);
+    return 0;
+  }
+
+  if (values['approval-totp-setup']) {
+    // No core needed: the secret is printed once to this terminal and never stored by Jovi.
+    const secret = generateTotpSecret();
+    process.stdout.write(
+      [
+        'Second factor for API approvals (Gate C).',
+        '1. Add this secret to your authenticator app (or scan a QR code made from the URI):',
+        `   ${otpauthUri(secret, localPrincipal().id)}`,
+        '2. Put it in .env (owner-only, chmod 600) and restart the API:',
+        `   JOVI_APPROVAL_TOTP_SECRET=${secret}`,
+        '3. Send the current 6-digit code as the X-Jovi-Approval-Code header with each API approval.',
+        'The secret is shown only here. Anyone with it and an approve-scoped token can approve.',
+        '',
+      ].join('\n'),
+    );
     return 0;
   }
 
@@ -111,10 +140,15 @@ async function main(): Promise<number> {
     if (values.providers) return await printProviders(core);
     if (values['audit-verify']) {
       const chain = core.events.verifyChain();
-      process.stdout.write(`${JSON.stringify(chain, null, 2)}\n`);
-      if (chain.ok) process.stdout.write(`Audit chain OK. Record this head outside this machine: #${chain.head?.sequence ?? 0} ${chain.head?.hash ?? '(empty)'}\n`);
-      return chain.ok ? 0 : 2;
+      const expected = values['expect-head'] ? parseAuditAnchors(values['expect-head']) : [];
+      const anchors = core.events.verifyAnchors([...core.config.audit.anchors, ...expected]);
+      process.stdout.write(`${JSON.stringify({ chain, anchors }, null, 2)}\n`);
+      if (chain.ok && anchors.ok) process.stdout.write(`Audit chain OK. Record this head outside this machine: #${chain.head?.sequence ?? 0} ${chain.head?.hash ?? '(empty)'}\n`);
+      if (!anchors.ok) process.stderr.write('The audit log no longer contains a recorded head: history was altered.\n');
+      return chain.ok && anchors.ok ? 0 : 2;
     }
+    if (values['safety-status']) return await safetyStatus(core);
+    if (values['safety-eval']) return await safetyEval(core, me.id);
     if (values.retention) {
       const result = core.retention.apply({ dryRun: values['dry-run'] });
       process.stdout.write(`${JSON.stringify({ policy: core.config.retention, ...result }, null, 2)}\n`);
@@ -411,3 +445,41 @@ main()
     process.stderr.write(`jovi: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exit(1);
   });
+
+/** Re-audit N-04: measure the deployed safety reviewer on the labelled corpus and record the result. */
+async function safetyEval(core: JoviCore, actor: string): Promise<number> {
+  if (core.providers.isSimulation()) {
+    process.stderr.write('Simulation mode: the mock reviewer is canned and exempt; calibrate against a real model (LM Studio or cloud).\n');
+    return 1;
+  }
+  const { corpus } = core.safetyCalibration.corpus();
+  process.stderr.write(`Calibrating the safety reviewer on ${corpus.cases.length} labelled cases (corpus v${corpus.version}). No media is generated.\n`);
+  const reviewer = routedSafetyReviewer(core.router, core.prompts, () => core.identity.getActive().profile, newId('correlation'));
+  const result = await core.safetyCalibration.calibrate(reviewer, actor, (done, total) => {
+    if (done % 10 === 0 || done === total) process.stderr.write(`  ${done}/${total}\n`);
+  });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  process.stdout.write(
+    result.passed
+      ? `PASSED: ${result.provider}:${result.model} may act as the safety reviewer (recall ${result.recall}, false blocks ${result.falseBlockRate}). Valid for ${result.policy.maxAgeDays} days.\n`
+      : `FAILED: ${result.failures.join('; ')}. Productions with this reviewer stay BLOCKED. Consider a stronger reviewer model (JOVI_SAFETY_REVIEW_MODEL).\n`,
+  );
+  return result.passed ? 0 : 2;
+}
+
+async function safetyStatus(core: JoviCore): Promise<number> {
+  const statuses = await core.providers.statusesFresh();
+  const rows = statuses
+    .filter((s) => s.available && s.selectedModel)
+    .map((s) => {
+      const latest = core.safetyCalibration.latest(s.provider, s.selectedModel!);
+      const p = latest?.payload as { recall?: number; falseBlockRate?: number; measuredAt?: string; passed?: boolean } | undefined;
+      return {
+        reviewer: `${s.provider}:${s.selectedModel}`,
+        status: core.safetyCalibration.status(s.provider, s.selectedModel!) ?? 'CALIBRATED',
+        lastRun: p ? { passed: p.passed, recall: p.recall, falseBlockRate: p.falseBlockRate, measuredAt: p.measuredAt } : null,
+      };
+    });
+  process.stdout.write(`${JSON.stringify({ pin: core.config.safety.reviewerPin ?? null, policy: core.safetyCalibration.policy, reviewers: rows }, null, 2)}\n`);
+  return 0;
+}

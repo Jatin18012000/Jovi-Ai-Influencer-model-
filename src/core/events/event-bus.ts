@@ -35,6 +35,7 @@ export const PROTECTED_EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>(
   'VISUAL_IDENTITY_VERSION_CREATED',
   'API_CREDENTIAL_CREATED',
   'API_CREDENTIAL_REVOKED',
+  'SAFETY_CALIBRATION_RECORDED',
 ]);
 
 /** Opaque capability that authorises emitting PROTECTED_EVENT_TYPES. */
@@ -119,8 +120,9 @@ export interface EventQuery {
 export class EventBus {
   private readonly handlers = new Map<EventType | '*', Set<EventHandler>>();
   private readonly append: Database.Transaction<(row: Omit<ChainRow, 'sequence' | 'prev_hash' | 'hash'>) => number>;
-  private readonly attestation: EventAttestation = Object.freeze({}) as EventAttestation;
-  private attestationIssued = false;
+  // Re-audit N-10: ECMAScript private fields — unreachable at runtime, unlike TypeScript `private`.
+  readonly #attestation: EventAttestation = Object.freeze({}) as EventAttestation;
+  #attestationIssued = false;
 
   constructor(
     private readonly sqlite: Database.Database,
@@ -149,13 +151,13 @@ export class EventBus {
    * hands it to the owning services; a second request is refused.
    */
   issueAttestation(): EventAttestation {
-    if (this.attestationIssued) throw new PermissionDeniedError('the event attestation capability has already been issued');
-    this.attestationIssued = true;
-    return this.attestation;
+    if (this.#attestationIssued) throw new PermissionDeniedError('the event attestation capability has already been issued');
+    this.#attestationIssued = true;
+    return this.#attestation;
   }
 
   emit(input: EmitInput): JoviEvent {
-    if (PROTECTED_EVENT_TYPES.has(input.eventType) && input.attestation !== this.attestation) {
+    if (PROTECTED_EVENT_TYPES.has(input.eventType) && input.attestation !== this.#attestation) {
       this.logger.warn({ security: 'PROTECTED_EVENT_REFUSED', eventType: input.eventType, source: input.source }, 'protected event refused');
       throw new PermissionDeniedError(`${input.eventType} events can only be emitted by the service that owns them`);
     }
@@ -313,6 +315,30 @@ export class EventBus {
     if (row.prev_hash !== (expectedPrev ?? GENESIS_HASH)) return { ok: false, reason: 'link to the previous event does not match' };
     if (eventHash(row.prev_hash, row) !== row.hash) return { ok: false, reason: 'content does not match its hash' };
     return { ok: true, reason: null };
+  }
+
+  /**
+   * Gate C: externally recorded heads (`JOVI_AUDIT_ANCHORS`, `--expect-head`)
+   * must still be in the chain with the same hash. A rewritten log cannot
+   * reproduce a hash recorded off the machine, so a mismatch or a missing
+   * anchored event means the history was altered. An anchor at or before the
+   * retention checkpoint is reported as PRUNED (only the checkpoint itself can
+   * still be compared): re-anchor after applying event retention.
+   */
+  verifyAnchors(anchors: ReadonlyArray<{ sequence: number; hash: string }>): {
+    ok: boolean;
+    results: Array<{ sequence: number; status: 'MATCH' | 'MISMATCH' | 'MISSING' | 'PRUNED' }>;
+  } {
+    const checkpoint = this.latestCheckpoint();
+    const results = anchors.map(({ sequence, hash }) => {
+      const row = this.sqlite.prepare('SELECT hash FROM events WHERE sequence = ?').get(sequence) as { hash: string | null } | undefined;
+      let status: 'MATCH' | 'MISMATCH' | 'MISSING' | 'PRUNED';
+      if (row) status = row.hash === hash.toLowerCase() ? 'MATCH' : 'MISMATCH';
+      else if (checkpoint && sequence <= checkpoint.sequence) status = sequence === checkpoint.sequence && checkpoint.hash !== hash.toLowerCase() ? 'MISMATCH' : 'PRUNED';
+      else status = 'MISSING';
+      return { sequence, status };
+    });
+    return { ok: results.every((r) => r.status === 'MATCH' || r.status === 'PRUNED'), results };
   }
 
   /** Latest event in a correlation, used to resume causation chains across processes. */

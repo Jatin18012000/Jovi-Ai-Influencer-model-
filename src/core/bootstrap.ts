@@ -5,6 +5,7 @@ import { ExecutiveAgent } from '../agents/executive/executive-agent.js';
 import { CreatorPlanningPipeline, IdeationAgent, ResearchAgent, StrategyAgent, TrendsAgent } from '../agents/planning/planning-agents.js';
 import { PLANNED_AGENTS } from '../agents/planned-agents.js';
 import { reviewAppearance } from '../agents/production/appearance-review.js';
+import { SAFETY_TASK_TYPE, safetyReviewerFingerprint } from '../agents/production/model-safety-review.js';
 import { CreativeProductionPipeline } from '../agents/production/production-pipeline.js';
 import { MediaInspector } from '../media/media-inspector.js';
 import { ApiCredentialService } from './auth/api-credentials.js';
@@ -31,6 +32,7 @@ import type { ModelProvider } from '../models/types.js';
 import { loadConfig, type JoviConfig } from './config/config.js';
 import { createLogger, type Logger } from './config/logger.js';
 import { fromRoot } from './config/paths.js';
+import { isAbsolute } from 'node:path';
 import { DecisionService } from './decisions/decision-service.js';
 import { EventBus } from './events/event-bus.js';
 import { IdentityService } from './identity/identity-service.js';
@@ -42,6 +44,7 @@ import { ContextEngine } from './orchestrator/context-engine.js';
 import { JoviOrchestrator } from './orchestrator/orchestrator.js';
 import { PromptLibrary } from './prompts/prompt-library.js';
 import { RetentionService } from './retention/retention-service.js';
+import { SafetyCalibrationService } from './safety/safety-calibration.js';
 import { StrategyService } from './strategy/strategy-service.js';
 
 export interface CreateCoreOptions {
@@ -67,6 +70,8 @@ export interface JoviCore {
   budget: CloudBudget;
   /** R-18: retention and backups. */
   retention: RetentionService;
+  /** Re-audit N-04: measured safety reviewer (calibration gate). */
+  safetyCalibration: SafetyCalibrationService;
   tasks: TaskService;
   jobs: JobQueue;
   worker: JobWorker;
@@ -157,7 +162,18 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
     cloudPreference: config.providers.cloudPreference,
     allowCloudFallback: config.providers.allowCloudFallback,
     budget,
+    ...(config.safety.reviewerPin ? { taskPins: { [SAFETY_TASK_TYPE]: config.safety.reviewerPin } } : {}),
   });
+  // Re-audit N-04: a real safety reviewer must hold a current, passing calibration before it can clear anything.
+  const safetyCalibration = new SafetyCalibrationService(
+    events,
+    attestation,
+    isAbsolute(config.safety.corpusPath) ? config.safety.corpusPath : fromRoot(config.safety.corpusPath),
+    () => safetyReviewerFingerprint(prompts),
+    (id) => providers.get(id)?.kind,
+    { minRecall: config.safety.minRecall, maxFalseBlockRate: config.safety.maxFalseBlockRate, maxAgeDays: config.safety.calibrationMaxAgeDays, minBlockCases: 40, minAllowCases: 20 },
+  );
+  const reviewerCalibration = (provider: string, model: string) => safetyCalibration.status(provider, model);
   const evaluator = new Evaluator(router, prompts, db, logger.child({ component: 'evaluator' }));
   const contextEngine = new ContextEngine({ identity, strategy, memory, knowledge, semantic, decisions, providers });
 
@@ -174,14 +190,14 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
       return { age: p.age, names: [p.name, p.creatorName] };
     },
     // Re-audit R2-02: anchors are reviewed by the model before a human-entered version is recorded.
-    (anchors) => reviewAppearance({ router, prompts, identity: () => identity.getActive().profile }, anchors),
+    (anchors) => reviewAppearance({ router, prompts, identity: () => identity.getActive().profile, reviewerCalibration }, anchors),
   );
   if (config.database.autoSeed) visualIdentity.seed();
   const mediaProviders = new MediaProviderRegistry(config.media.providerPreference);
   for (const provider of options.mediaProviders ?? createMediaProvidersFromConfig(config, mediaStore)) mediaProviders.register(provider);
   const assets = new AssetService(db);
   const mediaInspector = new MediaInspector({ ffprobePath: config.media.ffprobePath });
-  const productions = new ProductionService(db, assets, { bus: events, attestation }, config.media.maxRegenerations);
+  const productions = new ProductionService(db, assets, { bus: events, attestation, anchors: config.audit.anchors }, reviewerCalibration, config.media.maxRegenerations);
   const media = new MediaService(
     mediaProviders,
     assets,
@@ -235,6 +251,7 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
     strategy,
     planning,
     prompts,
+    reviewerCalibration,
     isSimulation: () => providers.isSimulation() || mediaProviders.isSimulation(),
     logger: logger.child({ component: 'production' }),
   });
@@ -264,6 +281,7 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
     credentials,
     budget,
     retention,
+    safetyCalibration,
     tasks,
     jobs,
     worker,

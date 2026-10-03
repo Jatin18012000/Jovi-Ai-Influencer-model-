@@ -73,6 +73,8 @@ export class MediaStore {
       if (!opened.isFile() || opened.size === 0 || !now || now.ino !== opened.ino || now.dev !== opened.dev) {
         throw new ValidationError(`refusing to read ${path}: the file changed while it was being opened`);
       }
+      // Re-audit N-06 (residual): a hard link can make a file outside the allowed directories appear inside them.
+      if (opened.nlink !== 1) throw new ValidationError(`refusing to read ${path}: the file is hard-linked (${opened.nlink} links)`);
       return fd;
     } catch (error) {
       closeSync(fd);

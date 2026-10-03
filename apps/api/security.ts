@@ -46,6 +46,8 @@ export function checkHostAndOrigin(
   headers: { host?: string | undefined; origin?: string | undefined },
   allowedHosts: readonly string[],
   allowedOrigins: readonly string[],
+  /** Re-audit N-09: a browser Origin on an allowed host must also use the API's own port (explicit JOVI_ALLOWED_ORIGINS entries are exempt). */
+  apiPort?: number,
 ): string | null {
   const host = hostnameOf(headers.host);
   if (!host || !allowedHosts.includes(host)) return `host "${headers.host ?? ''}" is not allowed`;
@@ -54,7 +56,14 @@ export function checkHostAndOrigin(
   if (allowedOrigins.includes(origin.replace(/\/+$/, '').toLowerCase())) return null;
   try {
     const url = new URL(origin);
-    if ((url.protocol === 'http:' || url.protocol === 'https:') && allowedHosts.includes(url.hostname.toLowerCase().replace(/^\[|\]$/g, ''))) return null;
+    const port = url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80;
+    if (
+      (url.protocol === 'http:' || url.protocol === 'https:') &&
+      allowedHosts.includes(url.hostname.toLowerCase().replace(/^\[|\]$/g, '')) &&
+      (apiPort === undefined || port === apiPort)
+    ) {
+      return null;
+    }
   } catch {
     // "null" and malformed origins fall through to refusal.
   }

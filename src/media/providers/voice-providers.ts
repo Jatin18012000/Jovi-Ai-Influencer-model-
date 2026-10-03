@@ -128,6 +128,8 @@ export interface ElevenLabsOptions {
   baseUrl: string;
   timeoutMs: number;
   statusTtlMs?: number;
+  /** R2-05: the owner's plan price (USD per 1,000 characters); unset = not estimated (counted at the unpriced worst case). */
+  usdPer1kChars?: number | undefined;
 }
 
 const ELEVENLABS_COST: CostEstimate = { estimatedApiCost: null, executionCostType: 'API', currency: 'USD', basis: 'ElevenLabs character-based pricing (plan dependent; not estimated)' };
@@ -159,6 +161,18 @@ export class ElevenLabsVoiceProvider implements VoiceGenerationProvider {
 
   estimateCost() {
     return ELEVENLABS_COST;
+  }
+
+  /** Per-character estimate when the owner configured their plan price (re-audit N-05). */
+  private costFor(characters: number): CostEstimate {
+    const price = this.options.usdPer1kChars;
+    if (price === undefined) return ELEVENLABS_COST;
+    return {
+      estimatedApiCost: Math.round(((characters / 1000) * price) * 1e6) / 1e6,
+      executionCostType: 'API',
+      currency: 'USD',
+      basis: `ElevenLabs ${characters} characters × $${price}/1k (ELEVENLABS_USD_PER_1K_CHARS)`,
+    };
   }
 
   private url(path: string) {
@@ -222,7 +236,7 @@ export class ElevenLabsVoiceProvider implements VoiceGenerationProvider {
       status: 'COMPLETED',
       location: output,
       mimeType: 'audio/mpeg',
-      cost: ELEVENLABS_COST,
+      cost: this.costFor(request.text.length),
       metadata: { voiceId: this.options.voiceId, characters: request.text.length, synthesisMs: Date.now() - started },
     };
   }

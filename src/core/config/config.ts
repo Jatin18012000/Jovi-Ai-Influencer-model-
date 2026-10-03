@@ -162,6 +162,21 @@ const EnvSchema = z.object({
   COMFYUI_IMAGE_WORKFLOW_SHA256: optionalSha256,
   COMFYUI_VIDEO_WORKFLOW_SHA256: optionalSha256,
 
+  /** Re-audit N-04: the labelled corpus used to calibrate the safety reviewer, and the pass thresholds. */
+  JOVI_SAFETY_EVAL_CORPUS: z.string().default('prompts/production/safety-eval-corpus.json'),
+  /** Fraction of BLOCK cases the reviewer must block. Cannot be configured below 0.9. */
+  JOVI_SAFETY_EVAL_MIN_RECALL: z.coerce.number().min(0.9).max(1).default(0.95),
+  JOVI_SAFETY_EVAL_MAX_FALSE_BLOCK_RATE: z.coerce.number().min(0).max(0.5).default(0.25),
+  JOVI_SAFETY_CALIBRATION_MAX_AGE_DAYS: z.coerce.number().int().min(1).max(90).default(30),
+  /** F-22: pin the safety reviewer to one provider ("lmstudio") or provider:model, ideally different from the generator. */
+  JOVI_SAFETY_REVIEW_MODEL: optionalString,
+  /** Gate C: base32 TOTP secret; API approvals require a current code (X-Jovi-Approval-Code). Unset = API approvals refused. */
+  JOVI_APPROVAL_TOTP_SECRET: optionalSecret,
+  /** Gate C: externally recorded audit heads ("sequence:hash", comma-separated) the chain must still contain. */
+  JOVI_AUDIT_ANCHORS: z.string().default(''),
+  /** R2-05: optional ElevenLabs price (USD per 1,000 characters) for budget estimates; unset = flat unpriced worst case. */
+  ELEVENLABS_USD_PER_1K_CHARS: z.coerce.number().min(0).optional(),
+
   /** R-18 retention. Events: 0 keeps the audit log forever (default). Agent/model runs hold prompts and outputs. */
   JOVI_EVENT_RETENTION_DAYS: z.coerce.number().int().min(0).default(0),
   JOVI_RUN_RETENTION_DAYS: z.coerce.number().int().min(0).default(180),
@@ -237,7 +252,7 @@ export type JoviConfig = {
     ffmpegTimeoutMs: number;
     sayVoice: string | undefined;
     sayPath: string;
-    elevenlabs: { apiKey: string | undefined; voiceId: string | undefined; model: string; baseUrl: string };
+    elevenlabs: { apiKey: string | undefined; voiceId: string | undefined; model: string; baseUrl: string; usdPer1kChars: number | undefined };
     voiceTimeoutMs: number;
     maxRegenerations: number;
     quotaBytes: number;
@@ -247,6 +262,17 @@ export type JoviConfig = {
   };
   /** R-18: retention in days (0 = keep forever). */
   retention: { eventDays: number; runDays: number };
+  /** Re-audit N-04 / F-22: safety reviewer calibration and pinning. */
+  safety: {
+    corpusPath: string;
+    minRecall: number;
+    maxFalseBlockRate: number;
+    calibrationMaxAgeDays: number;
+    reviewerPin: { provider: string; model: string | undefined } | undefined;
+  };
+  /** Gate C: second factor for API approvals and external audit anchors. */
+  approval: { totpSecret: string | undefined };
+  audit: { anchors: Array<{ sequence: number; hash: string }> };
   logLevel: z.infer<typeof EnvSchema>['JOVI_LOG_LEVEL'];
   /** Human-readable configuration warnings (e.g. obsolete variables). */
   warnings: string[];
@@ -265,6 +291,33 @@ function allowedHostsFor(bindHost: string, extra: string): string[] {
   if (bind !== '0.0.0.0' && bind !== '::') hosts.add(bind);
   for (const h of list(extra)) hosts.add(h.toLowerCase().replace(/^\[|\]$/g, ''));
   return [...hosts];
+}
+
+function reviewerPin(value: string | undefined): JoviConfig['safety']['reviewerPin'] {
+  if (!value) return undefined;
+  const colon = value.indexOf(':');
+  const provider = (colon === -1 ? value : value.slice(0, colon)).trim().toLowerCase();
+  const model = colon === -1 ? undefined : value.slice(colon + 1).trim() || undefined;
+  if (!/^[a-z0-9-]+$/.test(provider)) throw new ValidationError('JOVI_SAFETY_REVIEW_MODEL must be "provider" or "provider:model"');
+  return { provider, model };
+}
+
+/** Base32 (RFC 4648) TOTP secret of at least 160 bits. */
+function approvalSecret(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const normalised = value.replace(/[\s=-]/g, '').toUpperCase();
+  if (!/^[A-Z2-7]+$/.test(normalised) || normalised.length < 32) {
+    throw new ValidationError('JOVI_APPROVAL_TOTP_SECRET must be base32 with at least 32 characters (160 bits); generate one with `npm run jovi -- --approval-totp-setup`');
+  }
+  return normalised;
+}
+
+export function parseAuditAnchors(value: string): Array<{ sequence: number; hash: string }> {
+  return list(value).map((entry) => {
+    const m = /^#?(\d+):([0-9a-f]{64})$/i.exec(entry);
+    if (!m) throw new ValidationError(`JOVI_AUDIT_ANCHORS entry "${entry.slice(0, 80)}" must be "sequence:sha256-hash"`);
+    return { sequence: Number(m[1]), hash: m[2]!.toLowerCase() };
+  });
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
@@ -361,7 +414,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
       ffmpegTimeoutMs: parsed.JOVI_FFMPEG_TIMEOUT_MS,
       sayVoice: parsed.MACOS_SAY_VOICE,
       sayPath: parsed.MACOS_SAY_PATH,
-      elevenlabs: { apiKey: parsed.ELEVENLABS_API_KEY, voiceId: parsed.ELEVENLABS_VOICE_ID, model: parsed.ELEVENLABS_MODEL, baseUrl: parsed.ELEVENLABS_BASE_URL },
+      elevenlabs: {
+        apiKey: parsed.ELEVENLABS_API_KEY,
+        voiceId: parsed.ELEVENLABS_VOICE_ID,
+        model: parsed.ELEVENLABS_MODEL,
+        baseUrl: parsed.ELEVENLABS_BASE_URL,
+        usdPer1kChars: parsed.ELEVENLABS_USD_PER_1K_CHARS,
+      },
       voiceTimeoutMs: parsed.JOVI_VOICE_TIMEOUT_MS,
       maxRegenerations: parsed.JOVI_MAX_MEDIA_REGENERATIONS,
       quotaBytes: parsed.JOVI_MEDIA_QUOTA_MB * 1024 * 1024,
@@ -375,6 +434,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
       },
     },
     retention: { eventDays: parsed.JOVI_EVENT_RETENTION_DAYS, runDays: parsed.JOVI_RUN_RETENTION_DAYS },
+    safety: {
+      corpusPath: parsed.JOVI_SAFETY_EVAL_CORPUS,
+      minRecall: parsed.JOVI_SAFETY_EVAL_MIN_RECALL,
+      maxFalseBlockRate: parsed.JOVI_SAFETY_EVAL_MAX_FALSE_BLOCK_RATE,
+      calibrationMaxAgeDays: parsed.JOVI_SAFETY_CALIBRATION_MAX_AGE_DAYS,
+      reviewerPin: reviewerPin(parsed.JOVI_SAFETY_REVIEW_MODEL),
+    },
+    approval: { totpSecret: approvalSecret(parsed.JOVI_APPROVAL_TOTP_SECRET) },
+    audit: { anchors: parseAuditAnchors(parsed.JOVI_AUDIT_ANCHORS) },
     logLevel: parsed.JOVI_LOG_LEVEL,
     warnings,
   };
@@ -393,6 +461,7 @@ export function redactConfig(config: JoviConfig): Record<string, unknown> {
       lmstudio: { ...config.providers.lmstudio, apiKey: mask(config.providers.lmstudio.apiKey) },
     },
     api: { ...config.api, token: mask(config.api.token), previousToken: mask(config.api.previousToken) },
+    approval: { totpSecret: mask(config.approval.totpSecret) },
     media: { ...config.media, elevenlabs: { ...config.media.elevenlabs, apiKey: mask(config.media.elevenlabs.apiKey) } },
   };
 }

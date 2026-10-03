@@ -121,6 +121,8 @@ export const EventType = z.enum([
   'API_AUTH_FAILED',
   'MEDIA_GC_COMPLETED',
   'RETENTION_APPLIED',
+  // Re-audit remediation (N-04): measured safety reviewer
+  'SAFETY_CALIBRATION_RECORDED',
 ]);
 
 /** Kinds of media a production can require. */

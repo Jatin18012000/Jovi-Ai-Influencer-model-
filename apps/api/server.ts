@@ -10,6 +10,7 @@ import { ExternalMemoryInputSchema } from '../../src/memory/operational/operatio
 import { assessCompetition } from '../../src/models/competition/model-competition.js';
 import { EvaluableOptionSchema } from '../../src/models/evaluator/rule-checks.js';
 import { EventType, MemoryType } from '../../src/types/enums.js';
+import { TotpVerifier } from '../../src/core/auth/totp.js';
 import { AuthFailureRecorder, checkHostAndOrigin, ExpensiveCallLimiter, WriteRateLimiter } from './security.js';
 import type { ApiScope, Principal } from '../../src/core/auth/api-credentials.js';
 
@@ -93,6 +94,8 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
   let warnedPreviousToken = false;
   // R-08: auth failures become (throttled) audit events, not only log lines.
   const authFailures = new AuthFailureRecorder((payload) => core.events.emit({ eventType: 'API_AUTH_FAILED', source: 'api.auth', payload }));
+  // Gate C: second factor for API approvals (one verifier per server: replay and lockout state).
+  const approvalFactor = core.config.approval.totpSecret ? new TotpVerifier(core.config.approval.totpSecret) : null;
   const refuse = (request: FastifyRequest, reason: string, extra: Record<string, unknown> = {}) =>
     authFailures.failure(request.ip, { reason, method: request.method, path: request.url.split('?')[0]?.slice(0, 200) ?? '', ...extra });
 
@@ -107,7 +110,7 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
    * recorded for approvals, regenerations and identity changes.
    */
   app.addHook('onRequest', async (request, reply) => {
-    const refusal = checkHostAndOrigin({ host: request.headers.host, origin: request.headers.origin }, allowedHosts, allowedOrigins);
+    const refusal = checkHostAndOrigin({ host: request.headers.host, origin: request.headers.origin }, allowedHosts, allowedOrigins, core.config.api.port);
     if (refusal) {
       request.log.warn({ security: 'HOST_OR_ORIGIN_REFUSED', reason: refusal, url: request.url }, 'request refused');
       refuse(request, 'HOST_OR_ORIGIN_REFUSED', { host: String(request.headers.host ?? '').slice(0, 200), origin: request.headers.origin ? String(request.headers.origin).slice(0, 200) : null });
@@ -300,6 +303,20 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
     // The reviewer is the authenticated principal; a body-supplied reviewer is rejected.
     const body = HumanDecisionSchema.omit({ reviewer: true }).strict().parse(request.body ?? {});
     writeLimiter.hit(`decision:${actor(request)}`);
+    // Gate C: an API approval needs a second factor (TOTP), so a stolen bearer token alone cannot approve.
+    if (body.decision === 'APPROVE') {
+      if (!approvalFactor) {
+        throw new PermissionDeniedError(
+          'API approvals need a second factor: set JOVI_APPROVAL_TOTP_SECRET (npm run jovi -- --approval-totp-setup) and send X-Jovi-Approval-Code, or approve from the CLI',
+        );
+      }
+      const header = request.headers['x-jovi-approval-code'];
+      const refusal = approvalFactor.verify(Array.isArray(header) ? header[0] : header, id);
+      if (refusal) {
+        refuse(request, 'APPROVAL_CODE_REFUSED', { productionId: id, detail: refusal });
+        throw new PermissionDeniedError(`Second factor refused: ${refusal}`);
+      }
+    }
     const decision = { ...body, reviewer: actor(request) };
     const production = core.productions.get(id);
     const updated = core.productions.recordHumanDecision(id, decision, core.events.scope(production.correlationId));
@@ -370,7 +387,7 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
    * R-08: verifies the whole event hash chain and returns its head (sequence +
    * hash) so it can be recorded outside this machine. O(events): approve scope.
    */
-  app.get('/api/audit/verify', { config: { scope: 'audit' } }, async () => ({ chain: core.events.verifyChain() }));
+  app.get('/api/audit/verify', { config: { scope: 'audit' } }, async () => ({ chain: core.events.verifyChain(), anchors: core.events.verifyAnchors(core.config.audit.anchors) }));
 
   app.get('/api/events', { config: { scope: 'audit' } }, async (request) => {
     const q = EventsQuery.parse(request.query);

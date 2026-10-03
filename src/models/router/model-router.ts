@@ -93,7 +93,13 @@ export class ModelRouter {
     private readonly db: JoviDatabase,
     private readonly logger: Logger,
     private readonly prompts: PromptLibrary,
-    private readonly options: { cloudPreference: string[]; allowCloudFallback: boolean; budget?: CloudBudget },
+    private readonly options: {
+      cloudPreference: string[];
+      allowCloudFallback: boolean;
+      budget?: CloudBudget;
+      /** F-22: task types bound to one provider (optionally one model); no other model may serve them. */
+      taskPins?: Record<string, { provider: string; model: string | undefined }>;
+    },
   ) {}
 
   static tierOf(request: ResolvedRoutingRequest): RoutingTier {
@@ -150,6 +156,12 @@ export class ModelRouter {
           : category === 'HIGH'
             ? 'HIGH tier: cloud model required; LM Studio only as degraded fallback'
             : 'STRATEGIC tier: cloud model plus independent evaluator';
+    }
+    // F-22: a pinned task (e.g. the safety reviewer) is served only by its pinned model, never by a fallback.
+    const pin = this.options.taskPins?.[request.taskType];
+    if (pin) {
+      candidates = candidates.filter((c) => c.provider === pin.provider && (pin.model === undefined || c.model === pin.model));
+      reason += ` [pinned to ${pin.provider}${pin.model ? `:${pin.model}` : ''}]`;
     }
     // R-05: once the daily cloud budget is spent, cloud models are not selected (local ones still are).
     if (candidates.some((c) => c.kind === 'CLOUD')) {

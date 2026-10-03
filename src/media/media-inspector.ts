@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
-import { closeSync, constants, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, constants, fstatSync, mkdtempSync, openSync, readSync, rmSync, writeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { MediaKind } from '../types/enums.js';
 import { runProcess } from './process-runner.js';
 
@@ -32,33 +34,52 @@ const TAIL_BYTES = 1024 * 1024;
 // Re-audit R2-06: inspection never follows a symlink at the final path component.
 const READ_NOFOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
-function readRange(path: string, start: number, length: number): Buffer {
-  const fd = openSync(path, READ_NOFOLLOW);
-  try {
-    const buffer = Buffer.alloc(length);
-    const read = readSync(fd, buffer, 0, length, start);
-    return buffer.subarray(0, read);
-  } finally {
-    closeSync(fd);
-  }
+function readRange(fd: number, start: number, length: number): Buffer {
+  const buffer = Buffer.alloc(length);
+  const read = readSync(fd, buffer, 0, length, start);
+  return buffer.subarray(0, read);
 }
 
-function sha256(path: string, size: number): string {
+function sha256(fd: number, size: number): string {
   const hash = createHash('sha256');
-  const fd = openSync(path, READ_NOFOLLOW);
-  try {
-    const chunk = Buffer.alloc(1024 * 1024);
-    let position = 0;
-    while (position < size) {
-      const read = readSync(fd, chunk, 0, chunk.length, position);
-      if (read <= 0) break;
-      hash.update(chunk.subarray(0, read));
-      position += read;
-    }
-  } finally {
-    closeSync(fd);
+  const chunk = Buffer.alloc(1024 * 1024);
+  let position = 0;
+  while (position < size) {
+    const read = readSync(fd, chunk, 0, chunk.length, position);
+    if (read <= 0) break;
+    hash.update(chunk.subarray(0, read));
+    position += read;
   }
   return hash.digest('hex');
+}
+
+/**
+ * Re-audit N-06 (residual): ffprobe reads a private copy (0700 directory,
+ * 0600 file) of the bytes Jovi already verified through its descriptor, so
+ * the probed file is the hashed file and no path can be swapped underneath.
+ */
+function privateCopy(fd: number, size: number, extension: string): { path: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), 'jovi-probe-'));
+  const path = join(dir, `input${extension}`);
+  try {
+    const out = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+    try {
+      const chunk = Buffer.alloc(1024 * 1024);
+      let position = 0;
+      while (position < size) {
+        const read = readSync(fd, chunk, 0, chunk.length, position);
+        if (read <= 0) break;
+        writeSync(out, chunk, 0, read);
+        position += read;
+      }
+    } finally {
+      closeSync(out);
+    }
+  } catch (error) {
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+  return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 /** Identifies a media container from its leading bytes (magic numbers). */
@@ -141,51 +162,63 @@ export class MediaInspector {
 
   async inspect(path: string, kind: MediaKind): Promise<MediaInspection> {
     const base = { sha256: null, durationSeconds: null, width: null, height: null, method: 'SIGNATURE' as const };
-    let size: number;
+    // One descriptor (no symlink at the last component) for every measurement: sniffing, hashing and probing see the same bytes.
+    let fd: number;
     try {
-      size = statSync(path).size;
+      fd = openSync(path, READ_NOFOLLOW);
     } catch {
       return { ...base, ok: false, format: null, bytes: 0, reason: 'output file does not exist' };
     }
-    if (size === 0) return { ...base, ok: false, format: null, bytes: 0, reason: 'output file is empty' };
-    const head = readRange(path, 0, Math.min(size, HEAD_BYTES));
-    const format = sniffFormat(head);
-    if (!format) return { ...base, ok: false, format: null, bytes: size, reason: 'output is not a recognised media container' };
-    if (!FORMATS_BY_KIND[kind].includes(format)) {
-      return { ...base, ok: false, format, bytes: size, reason: `${format} output is not valid for a ${kind} asset` };
-    }
+    try {
+      const info = fstatSync(fd);
+      if (!info.isFile()) return { ...base, ok: false, format: null, bytes: 0, reason: 'output is not a regular file' };
+      if (info.nlink !== 1) return { ...base, ok: false, format: null, bytes: info.size, reason: 'output is hard-linked; refusing a file that may live outside the media store' };
+      const size = info.size;
+      if (size === 0) return { ...base, ok: false, format: null, bytes: 0, reason: 'output file is empty' };
+      const head = readRange(fd, 0, Math.min(size, HEAD_BYTES));
+      const format = sniffFormat(head);
+      if (!format) return { ...base, ok: false, format: null, bytes: size, reason: 'output is not a recognised media container' };
+      if (!FORMATS_BY_KIND[kind].includes(format)) {
+        return { ...base, ok: false, format, bytes: size, reason: `${format} output is not valid for a ${kind} asset` };
+      }
 
-    const probed = this.options.ffprobePath ? await this.ffprobe(path) : null;
-    let durationSeconds = probed?.durationSeconds ?? null;
-    let width = probed?.width ?? null;
-    let height = probed?.height ?? null;
-    if (!probed) {
-      if (format === 'png' && head.length >= 24) {
-        width = head.readUInt32BE(16);
-        height = head.readUInt32BE(20);
+      const probed = this.options.ffprobePath ? await this.ffprobe(fd, size, format) : null;
+      let durationSeconds = probed?.durationSeconds ?? null;
+      let width = probed?.width ?? null;
+      let height = probed?.height ?? null;
+      if (!probed) {
+        if (format === 'png' && head.length >= 24) {
+          width = head.readUInt32BE(16);
+          height = head.readUInt32BE(20);
+        }
+        if (format === 'wav') durationSeconds = wavDuration(head);
+        if (format === 'mp3') durationSeconds = mp3Duration(head, size);
+        if (format === 'mp4' || format === 'mov' || format === 'm4a') {
+          const tail = size > HEAD_BYTES ? readRange(fd, Math.max(0, size - TAIL_BYTES), Math.min(size, TAIL_BYTES)) : Buffer.alloc(0);
+          durationSeconds = mp4Duration([head, tail]);
+        }
       }
-      if (format === 'wav') durationSeconds = wavDuration(head);
-      if (format === 'mp3') durationSeconds = mp3Duration(head, size);
-      if (format === 'mp4' || format === 'mov' || format === 'm4a') {
-        const tail = size > HEAD_BYTES ? readRange(path, Math.max(0, size - TAIL_BYTES), Math.min(size, TAIL_BYTES)) : Buffer.alloc(0);
-        durationSeconds = mp4Duration([head, tail]);
-      }
+      return {
+        ok: true,
+        format,
+        bytes: size,
+        sha256: sha256(fd, size),
+        durationSeconds,
+        width,
+        height,
+        method: probed ? 'FFPROBE' : 'SIGNATURE',
+        reason: 'verified media output',
+      };
+    } finally {
+      closeSync(fd);
     }
-    return {
-      ok: true,
-      format,
-      bytes: size,
-      sha256: sha256(path, size),
-      durationSeconds,
-      width,
-      height,
-      method: probed ? 'FFPROBE' : 'SIGNATURE',
-      reason: 'verified media output',
-    };
   }
 
-  private async ffprobe(path: string): Promise<{ durationSeconds: number | null; width: number | null; height: number | null } | null> {
+  private async ffprobe(fd: number, size: number, format: MediaFormat): Promise<{ durationSeconds: number | null; width: number | null; height: number | null } | null> {
+    let copy: { path: string; cleanup: () => void } | null = null;
     try {
+      copy = privateCopy(fd, size, `.${format}`);
+      const path = copy.path;
       const result = await runProcess(
         'ffprobe',
         this.options.ffprobePath!,
@@ -203,6 +236,8 @@ export class MediaInspector {
       };
     } catch {
       return null;
+    } finally {
+      copy?.cleanup();
     }
   }
 }
