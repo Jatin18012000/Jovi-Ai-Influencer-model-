@@ -100,3 +100,9 @@ The event log is hash-chained. Someone with write access to `data/jovi.db` can s
 2. Store the printed head (`#sequence hash`) somewhere the Jovi machine cannot write: a password manager note, a ticket, or an email to yourself.
 
 A later head that does not extend a recorded one means the log was rewritten.
+
+> **Limitation (re-audit N-03).** Anchoring detects rewrites of the *tail*. It does **not** detect deletion of a *prefix* hidden behind a forged retention checkpoint: the head stays the same. Until R2-03 is implemented (checkpoints cross-checked against chained `RETENTION_APPLIED` events), also record:
+> - the checkpoint list (`SELECT * FROM audit_checkpoints`);
+> - the oldest remaining event sequence.
+>
+> Compare both on each check.

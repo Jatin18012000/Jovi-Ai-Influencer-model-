@@ -1,5 +1,7 @@
 # 16 — P2 Remediation Status (R-09 … R-19)
 
+> **Superseded gate verdict.** The fresh re-audit at `3318a43` (`docs/audit/v2/`) found N-01 (High): model-authored negative prompts bypass the safety gate. Gate J is **FAIL** again. The CONDITIONAL PASS below reflects the regression harness, which did not contain that attack. The gate of record is `13-security-gate.md`.
+
 Follow-up to `15-p1-remediation-status.md`. Branch `claude/busy-pascal-h6hvhh`, code commit `09ba05e` (CI green, including the container job), 2026-10-03.
 
 Evidence:

@@ -1,5 +1,44 @@
 # 13 — Security Gate
 
+## Current gate — re-audit at `3318a43` (2026-10-03)
+
+Source: `docs/audit/v2/SECURITY_REAUDIT_FINAL.md` (findings N-01 … N-12, probes RA-01 … RA-10, original harness 27/27 HELD).
+
+| Gate | Criterion | Result | Basis |
+|---|---|---|---|
+| **A** | No known Critical vulnerabilities | **PASS** | Highest open finding: N-01 (High) |
+| **B** | No exploitable High in internet-facing / API surfaces | **PASS** | Mandatory scoped auth, Host/Origin allow-list, generic 5xx, token policy (RT-05b, RT-06, RA-05, RA-07). N-01 is assessed under J, consistent with F-02 in the first audit |
+| **C** | No autonomous publishing bypass | **CONDITIONAL PASS** | No publishing code, tool, route or state; approvals need an `approve` credential and are attested by a chain-valid event (RT-05c, RT-18, RT-20). *Conditions before Phase 10:* R2-03 (N-03), external head anchoring, a second factor for API approvals |
+| **D** | No agent privilege escalation | **PASS** | RT-03, RT-04, RT-04b (artifact-scoped writes), RT-20; in-process trust documented (F-19, RA-10) |
+| **E** | No arbitrary command execution from model- or user-controlled data | **PASS** | RT-07; process execution log; optional executable pins |
+| **F** | No arbitrary filesystem escape | **PASS** | RT-08, RT-09 (real-path checks, no symlinks). Residual N-06 (TOCTOU, local writer, Low) |
+| **G** | No critical secret exposure | **PASS** | gitleaks history and tree: clean; tokens not logged (RA-05); public repository contains no secrets |
+| **H** | No critical dependency vulnerabilities | **PASS** | 0 runtime advisories; osv-scanner clean except one documented, expiring dev advisory |
+| **I** | Memory poisoning adequately controlled | **PASS** | RT-01, RT-02b |
+| **J** | Prompt injection cannot cross critical trust boundaries | **FAIL** | **N-01:** model-authored negative prompts reach image/video providers without the identity guard or the safety review (RA-01). **N-04:** heuristics miss 11/12 fresh paraphrases, and the model-graded review has never run against a real model |
+| **K** | Security events are auditable | **CONDITIONAL PASS** | Chained, attested events; auth-failure and process logs. *Condition:* R2-03 (N-03, a forged checkpoint hides prefix deletion) |
+| **L** | Supply chain has minimum controls | **CONDITIONAL PASS** | CI (4 jobs, green), SHA-pinned actions, checksum-verified scanners, SBOM, Dependabot, digest-pinned image. *Condition:* enforcement: the repository is public, with no protected branch or rulesets |
+
+**Overall gate verdict: FAIL** (J). Required to pass:
+- R2-01 (fix N-01).
+- R2-04 (real-model safety-review measurement, plus heuristic terms).
+
+Required for an unconditional pass on C, K and L: R2-03, a protected `main`, external anchoring, and an API approval second factor.
+
+### Gate history
+
+| Evaluation | Commit | Verdict | Failing gates |
+|---|---|---|---|
+| First audit | `eaf487c` | FAIL | B, I, J, L |
+| After P0 (`14`) | `35802ca` | FAIL | L |
+| After P1 (`15`) | `67a4783` | CONDITIONAL PASS | — |
+| After P2 (`16`) | `09ba05e` | CONDITIONAL PASS | — |
+| **Re-audit (v2)** | `3318a43` | **FAIL** | **J** (new evidence: N-01, N-04) |
+
+---
+
+## Original gate — first audit (historical)
+
 Evaluated at commit `eaf487c` (branch `claude/busy-pascal-h6hvhh`), 2026-10-03.
 
 | Gate | Criterion | Result | Basis |

@@ -57,10 +57,10 @@ How the pins behave:
 
 - **In-process enforcement (F-19).** The permission guard is in-process, not a sandbox. It is sound because agents are first-party code and models never select tools. It would **not** contain a malicious third-party agent: never load agent code you have not reviewed.
 - **Database write access.** A local attacker who can write `data/jovi.db` can:
-  - append a fully re-hashed forged event to the end of the chain;
-  - delete the retention checkpoint.
+  - append a fully re-hashed forged event to the end of the chain. Recording the chain head outside the machine detects this (runbook §6);
+  - delete any prefix of the log behind a forged retention checkpoint. This is **not** detected by head anchoring (re-audit N-03); the fix is R2-03.
 
-  To detect both, record the chain head outside the machine (`npm run jovi -- --audit-verify`, runbook §6). Approval attestation detects naive edits.
+  Approval attestation detects naive edits.
 - **Model independence (F-22).** With one local model, the generator, the evaluator, the QA model and the safety reviewer are the same model. The reviews are a second *pass*, not a second *opinion*. Configure a second provider for independent evaluation where it matters.
 - **ComfyUI.** Workflows and custom nodes execute arbitrary code inside ComfyUI. Jovi treats ComfyUI as part of the trusted computing base.
 - **Heuristic checks.** Identity, safety and likeness patterns are heuristics (labelled `HEURISTIC` in QA). The model-graded safety review and the human approval are the controls that count.
