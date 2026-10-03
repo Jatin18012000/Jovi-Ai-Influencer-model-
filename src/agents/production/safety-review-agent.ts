@@ -5,6 +5,7 @@ import { nowIso } from '../../core/ids.js';
 import type { PromptLibrary } from '../../core/prompts/prompt-library.js';
 import { parseModelJson } from '../../models/json-output.js';
 import type { Agent, AgentDefinition, AgentRunContext } from '../agent.js';
+import { CODE_NEGATIVE_PROMPT } from './creative-agents.js';
 import { findIdentityViolations } from './identity-guard.js';
 import {
   ProductionIdeaSchema,
@@ -37,7 +38,12 @@ export type SafetyReviewInput = z.infer<typeof SafetyReviewInputSchema>;
 
 const TASK_TYPE = 'production.safety_review';
 
-/** Every model- or user-authored text that will drive media generation (code-authored safety text excluded). */
+/**
+ * Every text that will drive media generation. Re-audit R2-02: the full image
+ * and video prompts are reviewed, including the character lock, because the
+ * lock carries human-entered visual-identity anchors. Negative prompts are
+ * code-authored (R2-01) and verified separately (`nonCodeNegatives`).
+ */
 export function materialForReview(idea: unknown, script: Script | null, storyboard: Storyboard | null, prompts: VisualPrompts | null): string[] {
   const i = ProductionIdeaSchema.partial().safeParse(idea);
   const texts: string[] = [];
@@ -50,10 +56,14 @@ export function materialForReview(idea: unknown, script: Script | null, storyboa
     for (const s of storyboard.scenes) texts.push(s.subject, s.joviAppearance, s.action, s.location, s.environment, s.wardrobe, ...s.onScreenText);
   }
   if (prompts) {
-    // The character lock and negative prompts are code-authored safety text; review only what the model wrote.
-    for (const p of prompts.prompts) texts.push(p.imagePrompt.replace(p.characterConsistency, ''), p.videoPrompt.replace(p.characterConsistency, ''));
+    for (const p of prompts.prompts) texts.push(p.imagePrompt, p.videoPrompt);
   }
   return texts.filter((t) => t && t.trim());
+}
+
+/** Scenes whose negative prompt is not the code-authored constant (R2-01): refused, never reviewed into acceptance. */
+export function nonCodeNegatives(prompts: VisualPrompts | null): string[] {
+  return (prompts?.prompts ?? []).filter((p) => p.negativePrompt !== CODE_NEGATIVE_PROMPT).map((p) => p.sceneId);
 }
 
 /**
@@ -90,7 +100,8 @@ export class SafetyReviewAgent implements Agent<SafetyReviewInput, SafetyReview,
       tools.production.getArtifact<VisualPrompts>(input.productionId, 'VISUAL_PROMPTS'),
     );
 
-    const violations = findIdentityViolations(material, identity.profile, { likeness: true });
+    const violations = findIdentityViolations(material, identity.profile, { likeness: true, allowNames: [identity.profile.name, identity.profile.creatorName] });
+    const foreignNegatives = nonCodeNegatives(tools.production.getArtifact<VisualPrompts>(input.productionId, 'VISUAL_PROMPTS'));
 
     let model: SafetyReview['model'];
     try {
@@ -121,6 +132,7 @@ export class SafetyReviewAgent implements Agent<SafetyReviewInput, SafetyReview,
 
     const reasons = [
       ...violations.map((v) => `heuristic ${v.rule}: "${v.match}"`),
+      ...(foreignNegatives.length ? [`NEGATIVE_PROMPT_NOT_CODE_AUTHORED: scenes ${foreignNegatives.join(', ')} (start a new production)`] : []),
       ...(model.available
         ? [
             ...model.review.checks.filter((c) => !c.pass).map((c) => `model check ${c.id} failed${c.note ? `: ${c.note}` : ''}`),

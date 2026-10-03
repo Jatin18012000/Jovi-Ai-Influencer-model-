@@ -273,7 +273,33 @@ export class EventBus {
       checked += 1;
       head = { sequence: row.sequence, hash: row.hash };
     }
+    // Re-audit R2-03: a checkpoint is only trusted when a later, chain-verified RETENTION_APPLIED
+    // event records the same {sequence, hash}. A forged checkpoint would need a forged event,
+    // which changes the head (detected by external anchoring).
+    if (checkpoint && !this.checkpointVouched(checkpoint)) {
+      return {
+        ok: false,
+        checked,
+        legacyUnchained,
+        head,
+        firstBreak: { sequence: checkpoint.sequence, eventId: 'audit_checkpoint', reason: 'retention checkpoint has no matching chained RETENTION_APPLIED event' },
+      };
+    }
     return { ok: true, checked, legacyUnchained, head, firstBreak: null };
+  }
+
+  private checkpointVouched(checkpoint: { sequence: number; hash: string }): boolean {
+    const rows = this.sqlite
+      .prepare("SELECT payload FROM events WHERE event_type = 'RETENTION_APPLIED' AND sequence > ? AND hash IS NOT NULL")
+      .all(checkpoint.sequence) as Array<{ payload: string }>;
+    return rows.some((r) => {
+      try {
+        const cp = (JSON.parse(r.payload) as { events?: { checkpoint?: { sequence?: number; hash?: string } } }).events?.checkpoint;
+        return cp?.sequence === checkpoint.sequence && cp.hash === checkpoint.hash;
+      } catch {
+        return false;
+      }
+    });
   }
 
   /** Verifies one event's hash and its link to the preceding event (cheap; used by the publishing gate). */

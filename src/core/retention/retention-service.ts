@@ -57,12 +57,16 @@ export class RetentionService {
         result.events.checkpoint = { sequence: last.sequence, hash: last.hash ?? GENESIS_HASH };
         if (!dryRun) {
           const checkpoint = result.events.checkpoint;
+          // Re-audit R2-03: checkpoint, deletion and the chained RETENTION_APPLIED event that
+          // vouches for the checkpoint are one transaction; verifyChain accepts a checkpoint only with it.
           this.sqlite.transaction(() => {
             this.sqlite
               .prepare('INSERT INTO audit_checkpoints (id, sequence, hash, pruned_events, pruned_before, created_at) VALUES (?, ?, ?, ?, ?, ?)')
               .run(newId('checkpoint'), checkpoint.sequence, checkpoint.hash, result.events.pruned, before, nowIso());
             this.sqlite.prepare('DELETE FROM events WHERE sequence <= ?').run(checkpoint.sequence);
+            this.events.emit({ eventType: 'RETENTION_APPLIED', source: 'core.retention', payload: { ...result, policy: this.policy } });
           }).immediate();
+          return result;
         }
       }
     }

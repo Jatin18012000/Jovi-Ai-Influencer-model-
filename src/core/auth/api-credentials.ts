@@ -17,8 +17,10 @@ import { newId, nowIso } from '../ids.js';
  *   operate         goals, planning, productions, media regeneration, evaluation, external memory
  *   approve         the human approval decision
  *   identity-admin  visual identity versions
+ *   audit           the event log and audit-chain verification (re-audit R2-09: security
+ *                   events such as auth failures are not visible to plain `read`)
  */
-export const ApiScope = z.enum(['read', 'operate', 'approve', 'identity-admin']);
+export const ApiScope = z.enum(['read', 'operate', 'approve', 'identity-admin', 'audit']);
 export type ApiScope = z.infer<typeof ApiScope>;
 export const ALL_SCOPES: readonly ApiScope[] = ApiScope.options;
 
@@ -94,7 +96,7 @@ export class ApiCredentialService {
     private readonly db: JoviDatabase,
     private readonly bus: EventBus,
     /** R-13: `previousToken` stays valid during a rollover of JOVI_API_TOKEN. */
-    private readonly envToken: { token: string | undefined; previousToken?: string | undefined; scopes: readonly ApiScope[] },
+    private readonly envToken: { token: string | undefined; previousToken?: string | undefined; previousTokenExpiresAt?: string | undefined; scopes: readonly ApiScope[] },
     /** R-08: credential events are protected (attested) events. */
     private readonly attestation?: EventAttestation,
   ) {
@@ -188,7 +190,8 @@ export class ApiCredentialService {
     if (this.envHash && timingSafeEqual(presented, this.envHash)) {
       return { id: 'env:JOVI_API_TOKEN', kind: 'env', name: 'JOVI_API_TOKEN', scopes: this.envToken.scopes };
     }
-    if (this.envPreviousHash && timingSafeEqual(presented, this.envPreviousHash)) {
+    const previousValid = !this.envToken.previousTokenExpiresAt || Date.parse(this.envToken.previousTokenExpiresAt) > Date.now();
+    if (this.envPreviousHash && previousValid && timingSafeEqual(presented, this.envPreviousHash)) {
       return { id: 'env:JOVI_API_TOKEN_PREVIOUS', kind: 'env', name: 'JOVI_API_TOKEN_PREVIOUS', scopes: this.envToken.scopes };
     }
     const row = this.db

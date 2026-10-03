@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { JoviDatabase } from '../../database/client.js';
 import { productionArtifacts, productions } from '../../database/schema.js';
@@ -164,10 +164,16 @@ export class ProductionService {
     const review = this.latestArtifact<{ verdict?: string; reasons?: string[] }>(productionId, 'SAFETY_REVIEW');
     if (!review) return 'SAFETY_REVIEW_REQUIRED: no pre-generation safety review exists for this production';
     if (review.verdict !== 'ALLOW') return `SAFETY_REVIEW_BLOCKED: ${(review.reasons ?? []).join('; ').slice(0, 300)}`;
-    const reviewedAt = this.artifactCreatedAt(productionId, 'SAFETY_REVIEW');
-    const promptsAt = this.artifactCreatedAt(productionId, 'VISUAL_PROMPTS');
-    if (promptsAt && reviewedAt && promptsAt > reviewedAt) return 'SAFETY_REVIEW_STALE: the visual prompts changed after the last review';
+    // Re-audit R2-09 (N-11): insertion order (rowid), not millisecond timestamps, decides staleness.
+    const reviewed = this.latestArtifactOrder(productionId, 'SAFETY_REVIEW');
+    const prompts = this.latestArtifactOrder(productionId, 'VISUAL_PROMPTS');
+    if (prompts !== null && reviewed !== null && prompts > reviewed) return 'SAFETY_REVIEW_STALE: the visual prompts changed after the last review';
     return null;
+  }
+
+  private latestArtifactOrder(productionId: string, kind: ArtifactKind): number | null {
+    const row = this.db.get<{ r: number | null }>(sql`SELECT max(rowid) AS r FROM production_artifacts WHERE production_id = ${productionId} AND kind = ${kind}`);
+    return row?.r ?? null;
   }
 
   /** When the latest artifact of a kind was stored (null if none). */

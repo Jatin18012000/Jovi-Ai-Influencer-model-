@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { closeSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, constants, openSync, readSync, statSync } from 'node:fs';
 import type { MediaKind } from '../types/enums.js';
 import { runProcess } from './process-runner.js';
 
@@ -29,8 +29,11 @@ export interface MediaInspection {
 const HEAD_BYTES = 64 * 1024;
 const TAIL_BYTES = 1024 * 1024;
 
+// Re-audit R2-06: inspection never follows a symlink at the final path component.
+const READ_NOFOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+
 function readRange(path: string, start: number, length: number): Buffer {
-  const fd = openSync(path, 'r');
+  const fd = openSync(path, READ_NOFOLLOW);
   try {
     const buffer = Buffer.alloc(length);
     const read = readSync(fd, buffer, 0, length, start);
@@ -42,7 +45,7 @@ function readRange(path: string, start: number, length: number): Buffer {
 
 function sha256(path: string, size: number): string {
   const hash = createHash('sha256');
-  const fd = openSync(path, 'r');
+  const fd = openSync(path, READ_NOFOLLOW);
   try {
     const chunk = Buffer.alloc(1024 * 1024);
     let position = 0;

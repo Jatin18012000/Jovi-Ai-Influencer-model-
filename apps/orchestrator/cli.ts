@@ -148,7 +148,7 @@ async function main(): Promise<number> {
         changeSummary: values.summary ?? '',
       });
       if (!(await confirm(`record a new visual identity version as ${me.id}`, 'identity', values.yes))) return 1;
-      const active = core.visualIdentity.createVersion(input.profile, input.approvedBy, input.changeSummary);
+      const active = await core.visualIdentity.createReviewedVersion(input.profile, input.approvedBy, input.changeSummary);
       process.stdout.write(`Visual identity v${active.version} recorded: ${active.status}${active.unlockedFields.length ? ` (unlocked: ${active.unlockedFields.join(', ')})` : ''}\n`);
       return 0;
     }

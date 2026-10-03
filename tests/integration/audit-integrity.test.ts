@@ -135,9 +135,11 @@ describe('R-08 audit coverage: auth failures and process executions', () => {
     await app.inject({ method: 'POST', url: '/api/jovi/goal', headers: bearer(core, ['read'], 'reader'), payload: { goal: 'x' } });
     const reasons = core.events.list({ eventType: 'API_AUTH_FAILED', limit: 10 }).map((e) => e.payload.reason);
     expect(reasons).toEqual(['MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'HOST_OR_ORIGIN_REFUSED', 'MISSING_SCOPE']);
-    // The audit verification route needs the approve scope.
+    // The audit routes need the dedicated audit scope (re-audit R2-09); approve or read alone is not enough.
     expect((await app.inject({ method: 'GET', url: '/api/audit/verify', headers: bearer(core, ['read', 'operate']) })).statusCode).toBe(403);
-    const verify = await app.inject({ method: 'GET', url: '/api/audit/verify', headers: bearer(core, ['approve']) });
+    expect((await app.inject({ method: 'GET', url: '/api/audit/verify', headers: bearer(core, ['approve']) })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'GET', url: '/api/events', headers: bearer(core, ['read']) })).statusCode).toBe(403);
+    const verify = await app.inject({ method: 'GET', url: '/api/audit/verify', headers: bearer(core, ['audit']) });
     expect(verify.json().chain).toMatchObject({ ok: true });
     await app.close();
 

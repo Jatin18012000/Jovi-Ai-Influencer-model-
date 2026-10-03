@@ -4,6 +4,7 @@ import type { ToolServices } from '../agents/toolkit.js';
 import { ExecutiveAgent } from '../agents/executive/executive-agent.js';
 import { CreatorPlanningPipeline, IdeationAgent, ResearchAgent, StrategyAgent, TrendsAgent } from '../agents/planning/planning-agents.js';
 import { PLANNED_AGENTS } from '../agents/planned-agents.js';
+import { reviewAppearance } from '../agents/production/appearance-review.js';
 import { CreativeProductionPipeline } from '../agents/production/production-pipeline.js';
 import { MediaInspector } from '../media/media-inspector.js';
 import { ApiCredentialService } from './auth/api-credentials.js';
@@ -111,7 +112,7 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   const events = new EventBus(sqlite, logger.child({ component: 'events' }));
   // R-08: the capability to emit protected (attesting) events goes only to the services that own them.
   const attestation = events.issueAttestation();
-  const credentials = new ApiCredentialService(db, events, { token: config.api.token, previousToken: config.api.previousToken, scopes: config.api.tokenScopes }, attestation);
+  const credentials = new ApiCredentialService(db, events, { token: config.api.token, previousToken: config.api.previousToken, previousTokenExpiresAt: config.api.previousTokenExpiresAt, scopes: config.api.tokenScopes }, attestation);
   // R-08: every external process execution is logged (binary, redacted arguments, duration, exit code).
   const processLogger = logger.child({ component: 'process' });
   setProcessAuditSink((record) => processLogger.info({ audit: 'PROCESS_EXECUTED', ...record }, 'external process executed'));
@@ -122,7 +123,7 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
     [config.media.sayPath]: config.media.pins.say,
   });
   // R-05: daily cloud spend cap shared by the model router and the media service.
-  const budget = new CloudBudget(sqlite, config.budget.dailyCloudUsd);
+  const budget = new CloudBudget(sqlite, config.budget.dailyCloudUsd, () => new Date(), config.budget.unpricedCallUsd);
   const tasks = new TaskService(db);
   const jobs = new JobQueue(db, sqlite, events, logger.child({ component: 'jobs' }), {
     defaultMaxAttempts: config.jobs.maxAttempts,
@@ -163,7 +164,18 @@ export async function createJoviCore(options: CreateCoreOptions = {}): Promise<J
   // Phase 8: visual identity, media providers, assets and productions.
   // Phase 9: capability-based provider selection with fallback and verified outputs.
   const mediaStore = new MediaStore(config.media.dir, config.media.referenceDir);
-  const visualIdentity = new VisualIdentityService(db, 'jovi', (path) => mediaStore.isReadableInput(path), { bus: events, attestation }, () => identity.getActive().profile.age);
+  const visualIdentity = new VisualIdentityService(
+    db,
+    'jovi',
+    (path) => mediaStore.isReadableInput(path),
+    { bus: events, attestation },
+    () => {
+      const p = identity.getActive().profile;
+      return { age: p.age, names: [p.name, p.creatorName] };
+    },
+    // Re-audit R2-02: anchors are reviewed by the model before a human-entered version is recorded.
+    (anchors) => reviewAppearance({ router, prompts, identity: () => identity.getActive().profile }, anchors),
+  );
   if (config.database.autoSeed) visualIdentity.seed();
   const mediaProviders = new MediaProviderRegistry(config.media.providerPreference);
   for (const provider of options.mediaProviders ?? createMediaProvidersFromConfig(config, mediaStore)) mediaProviders.register(provider);

@@ -1,4 +1,5 @@
-import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { ValidationError } from '../core/errors.js';
 import { resolveFromRoot } from '../core/config/paths.js';
@@ -53,23 +54,73 @@ export class MediaStore {
   }
 
   /**
-   * R-09: reads a confined input file (media or reference directory) without
-   * following symlinks. The path is checked, then opened with O_NOFOLLOW
-   * where the platform supports it, and the opened descriptor is re-checked
-   * (regular, non-empty file), so a swap after the check cannot redirect it.
+   * R-09 / re-audit R2-06: opens a confined file and proves the descriptor is
+   * the file that was checked. O_NOFOLLOW only protects the last path
+   * component, so after opening, the path is validated again (real path still
+   * inside a root) and must name the same file (device + inode) as the open
+   * descriptor. A parent directory swapped to a symlink between check and
+   * open is therefore detected. The caller closes the descriptor.
    */
-  readInput(path: string): Buffer {
+  private openVerified(path: string, roots: readonly string[]): number {
     const candidates = [resolve(path), resolveFromRoot(path)];
-    const target = candidates.find((p) => MediaStore.isFileWithin(this.root, p) || MediaStore.isFileWithin(this.referenceRoot, p));
-    if (!target) throw new ValidationError(`refusing to read ${path}: not a regular file inside the media or reference directory`);
+    const within = (p: string) => roots.some((r) => MediaStore.isFileWithin(r, p));
+    const target = candidates.find(within);
+    if (!target) throw new ValidationError(`refusing to read ${path}: not a regular file inside the allowed directories`);
     const fd = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     try {
-      const info = fstatSync(fd);
-      if (!info.isFile() || info.size === 0) throw new ValidationError(`refusing to read ${path}: not a regular non-empty file`);
+      const opened = fstatSync(fd);
+      const now = within(target) ? lstatSync(target) : null;
+      if (!opened.isFile() || opened.size === 0 || !now || now.ino !== opened.ino || now.dev !== opened.dev) {
+        throw new ValidationError(`refusing to read ${path}: the file changed while it was being opened`);
+      }
+      return fd;
+    } catch (error) {
+      closeSync(fd);
+      throw error;
+    }
+  }
+
+  /** Reads a confined input file (media or reference directory) without following symlinks. */
+  readInput(path: string): Buffer {
+    const fd = this.openVerified(path, [this.root, this.referenceRoot]);
+    try {
       return readFileSync(fd);
     } finally {
       closeSync(fd);
     }
+  }
+
+  /**
+   * Re-audit R2-06: copies media-store files into a fresh private (0700)
+   * temporary directory through verified descriptors, so an external process
+   * (ffmpeg) reads files no other user can swap. Call `cleanup` when done.
+   */
+  stageInputs(locations: ReadonlyMap<string, string>): { paths: Map<string, string>; cleanup: () => void } {
+    const dir = mkdtempSync(join(tmpdir(), 'jovi-stage-'));
+    const paths = new Map<string, string>();
+    const chunk = Buffer.alloc(1024 * 1024);
+    try {
+      for (const [key, location] of locations) {
+        const source = this.openVerified(location, [this.root]);
+        const dest = join(dir, `${paths.size}${extname(location).toLowerCase()}`);
+        const out = openSync(dest, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+        try {
+          for (;;) {
+            const read = readSync(source, chunk, 0, chunk.length, null);
+            if (read <= 0) break;
+            writeSync(out, chunk, 0, read);
+          }
+        } finally {
+          closeSync(out);
+          closeSync(source);
+        }
+        paths.set(key, dest);
+      }
+    } catch (error) {
+      rmSync(dir, { recursive: true, force: true });
+      throw error;
+    }
+    return { paths, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
   }
 
   /** R-05: bytes used under the media root (regular files only; symlinks are not followed). */

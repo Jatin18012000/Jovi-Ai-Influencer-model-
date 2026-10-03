@@ -101,8 +101,4 @@ The event log is hash-chained. Someone with write access to `data/jovi.db` can s
 
 A later head that does not extend a recorded one means the log was rewritten.
 
-> **Limitation (re-audit N-03).** Anchoring detects rewrites of the *tail*. It does **not** detect deletion of a *prefix* hidden behind a forged retention checkpoint: the head stays the same. Until R2-03 is implemented (checkpoints cross-checked against chained `RETENTION_APPLIED` events), also record:
-> - the checkpoint list (`SELECT * FROM audit_checkpoints`);
-> - the oldest remaining event sequence.
->
-> Compare both on each check.
+> **Prefix deletion (re-audit N-03, fixed by R2-03).** A retention checkpoint is now accepted only when a later, chain-verified `RETENTION_APPLIED` event records the same `{sequence, hash}`. Forging one would mean inserting an event, which changes the head, and anchoring detects that. Anchoring the head therefore covers both tail rewrites and prefix deletion.

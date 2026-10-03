@@ -1,6 +1,52 @@
 # 13 — Security Gate
 
-## Current gate — re-audit at `3318a43` (2026-10-03)
+## Current gate — after re-audit remediation R2 (2026-10-03)
+
+Source: `docs/audit/v2/06-remediation-status.md`.
+
+Evidence:
+- Probes RA-01 … RA-11: 8 HELD, 3 INFO (`reaudit-probe-results-after-r2.json`).
+- Original harness: 27/27 HELD (`redteam-results-after-r2.json`).
+- Test suite: 299 passed, 9 skipped (real providers).
+
+| Gate | Result | Basis |
+|---|---|---|
+| **A** | **PASS** | No Critical findings. N-01 (High) fixed |
+| **B** | **PASS** | Unchanged. Security events now need the `audit` scope; asset paths are relative (N-08) |
+| **C** | **CONDITIONAL PASS** | No publishing path; attested approvals; R2-03 closes N-03. *Conditions before Phase 10:* external head anchoring and a second factor for API approvals |
+| **D** | **PASS** | Unchanged |
+| **E** | **PASS** | Unchanged |
+| **F** | **PASS** | Descriptor verification (device and inode) and private staged inputs for ffmpeg (N-06). Residual: ffprobe opens by path; hardlinks are not detected (Low, local writer) |
+| **G** | **PASS** | The owner token is no longer logged; it is written to a 0600 file and checked in CI (N-07) |
+| **H** | **PASS** | Unchanged |
+| **I** | **PASS** | Unchanged |
+| **J** | **CONDITIONAL PASS** | **The structural crossing is closed:** negative prompts are code-authored only, and the safety review refuses any other (RA-01 HELD). Visual-identity anchors are reviewed by heuristics plus a fail-closed model review, and are inside the pre-generation review (RA-02 HELD). *Condition (blocking for production use):* **N-04 remains open.** On held-out paraphrases the heuristics catch 1/12 (RA-11), so paraphrase depends on the model-graded review, which has never been measured on a real model (R2-04, owner) |
+| **K** | **PASS** | A checkpoint is accepted only with a matching chained `RETENTION_APPLIED` event (RA-03 HELD, N-03 fixed) |
+| **L** | **CONDITIONAL PASS** | Controls work (CI with 4 jobs). *Condition:* the repository is public, with no protected branch (R2-08, owner) |
+
+**Overall gate verdict: CONDITIONAL PASS.**
+
+Conditions, in order:
+1. **R2-04:** real-model safety-review recall measured and above an agreed minimum (J). Blocking for any production use.
+2. **R2-08:** protected `main` (L).
+3. **Before Phase 10:** external anchoring, an API approval second factor and an independent human security review (C).
+
+**CSO answer:** **not yet for production.** Once conditions 1 and 2 are met: **conditionally yes for attended, human-approved local production**. **No** for unattended production and Phase 10 publishing until condition 3 is met.
+
+### Gate history
+
+| Evaluation | Commit | Verdict | Failing gates |
+|---|---|---|---|
+| First audit | `eaf487c` | FAIL | B, I, J, L |
+| After P0 (`14`) | `35802ca` | FAIL | L |
+| After P1 (`15`) | `67a4783` | CONDITIONAL PASS | — |
+| After P2 (`16`) | `09ba05e` | CONDITIONAL PASS | — |
+| Re-audit (v2) | `3318a43` | FAIL | J (new evidence: N-01, N-04) |
+| **Re-audit remediation (R2)** (`v2/06`) | this commit | **CONDITIONAL PASS** | — (J conditional on R2-04) |
+
+---
+
+## Previous gate — re-audit at `3318a43` (historical)
 
 Source: `docs/audit/v2/SECURITY_REAUDIT_FINAL.md` (findings N-01 … N-12, probes RA-01 … RA-10, original harness 27/27 HELD).
 
@@ -25,15 +71,7 @@ Source: `docs/audit/v2/SECURITY_REAUDIT_FINAL.md` (findings N-01 … N-12, probe
 
 Required for an unconditional pass on C, K and L: R2-03, a protected `main`, external anchoring, and an API approval second factor.
 
-### Gate history
-
-| Evaluation | Commit | Verdict | Failing gates |
-|---|---|---|---|
-| First audit | `eaf487c` | FAIL | B, I, J, L |
-| After P0 (`14`) | `35802ca` | FAIL | L |
-| After P1 (`15`) | `67a4783` | CONDITIONAL PASS | — |
-| After P2 (`16`) | `09ba05e` | CONDITIONAL PASS | — |
-| **Re-audit (v2)** | `3318a43` | **FAIL** | **J** (new evidence: N-01, N-04) |
+Gate history: see the current gate section above.
 
 ---
 

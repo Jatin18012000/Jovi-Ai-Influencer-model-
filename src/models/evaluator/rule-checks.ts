@@ -81,6 +81,10 @@ export const HUMAN_CLAIM = new RegExp(
     "\\b(?:i'?m|i am|she'?s|she is|jovi is|jovi's)\\s+(?:not|never|no)\\s+(?:an?\\s+)?(?:ai|a\\.i\\.|artificial|bot|robot|virtual(?!\\s+assistant)|computer|program|machine|algorithm|digital|synthetic)\\b",
     "\\b(?:i'?m|i am|she'?s|she is|jovi is)\\s+(?:100%|totally|completely|fully|actually|really)\\s+(?:real|human)\\b",
     '\\bnot an ai\\b',
+    // Re-audit R2-04: subject-less denials of being synthetic.
+    '\\bflesh[- ]and[- ](?:blood|bone)\\b',
+    "\\bno (?:code|algorithms?|ai|a\\.i\\.|cgi|software) (?:behind|here|involved|at all)\\b",
+    '\\b(?:not|never|no)\\s+(?:ai[- ]generated|computer[- ]generated|cgi|synthetic|rendered)\\b',
   ].join('|'),
   'i',
 );

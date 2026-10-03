@@ -27,8 +27,8 @@ export function parseNumber(token: string): number | null {
   return i >= 0 ? i : null;
 }
 
-/** "I'm 19", "she is nineteen", "aged 16", "turning seventeen". */
-const AGE_CLAIM = new RegExp(`\\b(?:i'?m|i am|she'?s|she is|jovi is|jovi,?|aged?|turning|turned)\\s+${NUMBER}\\b(?:\\s*(?:years?[- ]old|years? young|y\\/?o))?`, 'gi');
+/** "I'm 19", "she is nineteen", "aged 16", "turning seventeen", "I'm a mere seventeen" (R2-04: up to two filler words). */
+const AGE_CLAIM = new RegExp(`\\b(?:i'?m|i am|she'?s|she is|jovi is|jovi,?|aged?|turning|turned)\\s+(?:(?:a|just|only|barely|mere|still|nearly|almost|now)\\s+){0,2}${NUMBER}\\b(?!\\s*(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?|months?|percent|%|steps?|reels?|posts?|followers?|times|episodes?|cups?|coffees?)\\b)(?:\\s*(?:years?[- ]old|years? young|y\\/?o))?`, 'gi');
 /** "a 16 year old girl", "17-year-old version of me" — an age attached to a person, without a subject. */
 const PERSON_AGE = new RegExp(
   `\\b${NUMBER}[- ]?(?:years?|yrs?)[- ]old\\b(?:[\\s,-]+[a-z']+){0,2}?[\\s,-]+(?:girls?|boys?|kids?|child(?:ren)?|teens?|teenagers?|students?|daughters?|sons?|models?|wom[ae]n|person|people|influencers?|versions?|selves|self|me|her|she|jovi)\\b`,
@@ -36,7 +36,7 @@ const PERSON_AGE = new RegExp(
 );
 /** Minor and youth descriptors, including school context. */
 const MINOR_DESCRIPTOR =
-  /\b(teens?|teen(?:age|ager|agers)|tween(?:s|age|ager|agers)?|pre-?teens?|school-?girls?|school ?uniforms?|under-?age|minors|minor(?=\s*(?:[.,;!?)]|$))|child(?:like|ish|hood photo)?|children|kids?|little girls?|young girls?|high[- ]school(?:ers?)?|middle[- ]school(?:ers?)?|primary school|elementary school|juvenile|adolescen(?:t|ts|ce)|jailbait|barely legal|loli\w*)\b/i;
+  /\b(teens?|teen(?:age|ager|agers)|tween(?:s|age|ager|agers)?|pre-?teens?|school-?girls?|school ?uniforms?|under-?age|minors|minor(?=\s*(?:[.,;!?)]|$))|child(?:like|ish|hood photo)?|children|kids?|little girls?|young girls?|high[- ]school(?:ers?)?|middle[- ]school(?:ers?)?|primary school|elementary school|juvenile|adolescen(?:t|ts|ce)|jailbait|barely legal|loli\w*|(?:pre-?)?pubescent|sweet sixteen|sixth[- ]form(?:ers?)?|gcses?|freshman year|sophomore year|(?:year|yr) ?(?:[5-9]|1[01])\s+(?:students?|pupils?|class|kids?)|(?:[5-9]|1[0-2])th[- ]grade(?:rs?)?|learner'?s? permit|too young to (?:drink|vote|drive))\b/i;
 /** Origin claims; the place must be capitalised (a proper noun). */
 const ORIGIN_CLAIM =
   /\b(?:(?:[Ii]'?m|[Ii] am|[Ss]he'?s|[Ss]he is|[Jj]ovi is)\s+(?:originally\s+)?from|[Bb]orn(?:\s+and\s+(?:raised|bred))?\s+in|[Gg]rew\s+up\s+in|[Rr]aised\s+in|[Hh]ometown(?:\s+is)?)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)/g;
@@ -59,12 +59,37 @@ function allowedPlaces(origin: string): string[] {
 /** Real-person likeness / impersonation markers (in positive prompts or content). */
 export const LIKENESS = /\b(looks? like|look-?alike|resembl\w*|doppelg[aä]nger|in the (?:style|likeness) of|impersonat\w*|deepfake|face ?swap|celebrity)\b/i;
 
+/**
+ * Re-audit R2-02: a real person named directly next to a facial feature
+ * ("Taylor Swift face", "Zendaya's jawline", "face of the singer Dua Lipa").
+ * Names are capitalised; Jovi's own names are allowed. Heuristic.
+ */
+const ANATOMY = '(?:face|facial features|jawline|jaw|cheekbones|nose|lips|eyes|smile|features)';
+const NAME = "([A-Z][a-z\\u00C0-\\u024F]+(?:[ -][A-Z][a-z\\u00C0-\\u024F]+){0,2})";
+const NAMED_LIKENESS = [
+  new RegExp(`\\b${NAME}['’]s\\s+${ANATOMY}\\b`, 'g'),
+  new RegExp(`\\b${NAME.replace('{0,2}', '{1,2}')}\\s+${ANATOMY}\\b`, 'g'),
+  new RegExp(`\\b(?:face|features|likeness|look|smile|jawline)\\s+of\\s+(?:the\\s+|a\\s+)?(?:(?:singer|actress|actor|model|rapper|influencer|celebrity|athlete|footballer|pop ?star|star|youtuber|streamer)\\s+)?${NAME}`, 'g'),
+];
+
+function findNamedLikeness(text: string, allowNames: readonly string[]): string | null {
+  const allowed = new Set(allowNames.map((n) => n.toLowerCase()));
+  for (const pattern of NAMED_LIKENESS) {
+    for (const m of text.matchAll(pattern)) {
+      const name = (m[1] ?? '').trim();
+      if (!name || name.split(/[ -]/).every((part) => allowed.has(part.toLowerCase()))) continue;
+      return m[0];
+    }
+  }
+  return null;
+}
+
 export interface IdentityViolation {
   rule: 'AI_TRANSPARENCY' | 'AGE' | 'ORIGIN' | 'MINOR_DEPICTION' | 'REAL_PERSON_LIKENESS' | 'EXPLICIT';
   match: string;
 }
 
-export function findIdentityViolations(texts: readonly string[], identity: JoviIdentity, options: { likeness?: boolean } = {}): IdentityViolation[] {
+export function findIdentityViolations(texts: readonly string[], identity: JoviIdentity, options: { likeness?: boolean; allowNames?: readonly string[] } = {}): IdentityViolation[] {
   const joined = texts.filter(Boolean).join('\n');
   const violations: IdentityViolation[] = [];
 
@@ -94,7 +119,7 @@ export function findIdentityViolations(texts: readonly string[], identity: JoviI
   if (explicit) violations.push({ rule: 'EXPLICIT', match: explicit });
 
   if (options.likeness) {
-    const likeness = findViolation(joined, LIKENESS);
+    const likeness = findViolation(joined, LIKENESS) ?? findNamedLikeness(joined, options.allowNames ?? [identity.name, identity.creatorName]);
     if (likeness) violations.push({ rule: 'REAL_PERSON_LIKENESS', match: likeness });
   }
   return violations;
@@ -106,10 +131,10 @@ export function findIdentityViolations(texts: readonly string[], identity: JoviI
  * and explicit content are refused. Negated phrasing ("not resembling any
  * real person", "never explicit") is allowed. Heuristic, like the rest.
  */
-export function findAppearanceViolations(texts: readonly string[]): IdentityViolation[] {
+export function findAppearanceViolations(texts: readonly string[], allowNames: readonly string[] = []): IdentityViolation[] {
   const joined = texts.filter(Boolean).join('\n');
   const violations: IdentityViolation[] = [];
-  const likeness = findViolation(joined, LIKENESS);
+  const likeness = findViolation(joined, LIKENESS) ?? findNamedLikeness(joined, allowNames);
   if (likeness) violations.push({ rule: 'REAL_PERSON_LIKENESS', match: likeness });
   const minor = findViolation(joined, MINOR_DESCRIPTOR);
   if (minor) violations.push({ rule: 'MINOR_DEPICTION', match: minor });

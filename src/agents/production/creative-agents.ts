@@ -43,6 +43,17 @@ export const VISUAL_PROMPT_AGENT_DEFINITION = textAgent('visual-prompt', 'Conver
 export const STANDARD_NEGATIVES =
   'real person likeness, celebrity, lookalike, minor, childlike features, nudity, explicit content, watermark, logo, text artifacts, distorted face, inconsistent face, extra fingers, deformed hands';
 
+/** Generic image-quality negatives (code-authored). */
+export const TECHNICAL_NEGATIVES = 'blurry, low quality, jpeg artifacts, overexposed, duplicate subject';
+
+/**
+ * Re-audit R2-01 (N-01): the negative prompt sent to image/video providers is
+ * code-authored only. A model-written negative ("adult, mature woman") steers
+ * generation toward exactly what the safety gate must prevent, and negatives
+ * are not reviewed, so the model's negativePrompt suggestion is discarded.
+ */
+export const CODE_NEGATIVE_PROMPT = `${TECHNICAL_NEGATIVES}, ${STANDARD_NEGATIVES}`;
+
 export interface CreativeContext {
   identity: JoviIdentity;
   identityVersion: number;
@@ -263,7 +274,7 @@ export class VisualPromptAgent extends CreativeTextAgent<VisualPromptAgentInput,
           sceneId: scene.sceneId,
           imagePrompt: `${lock}${p.imagePrompt} Global style: ${draft.globalStyle}`,
           videoPrompt: `${lock}${p.videoPrompt}`,
-          negativePrompt: [p.negativePrompt, STANDARD_NEGATIVES].filter(Boolean).join(', '),
+          negativePrompt: CODE_NEGATIVE_PROMPT,
           characterConsistency: scene.featuresJovi ? characterLock : 'Scene does not feature Jovi.',
           environmentConsistency: p.environmentConsistency,
           wardrobeConsistency: p.wardrobeConsistency,

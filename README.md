@@ -54,7 +54,7 @@ npm run start:dev             # tsx, http://127.0.0.1:3000
 npm run build && npm start    # compiled
 ```
 
-On first start the API creates an `owner` credential (all scopes) and prints its token **once** to stderr; only its SHA-256 hash is stored. Create narrower credentials with `npm run jovi -- --api-token create --name n8n --scopes read,operate`.
+On first start the API creates an `owner` credential (all scopes) and writes its token **once** to `data/owner-token` (mode 0600). Only the SHA-256 hash is stored in the database. Copy the token into a password manager, then delete the file. Create narrower credentials with `npm run jovi -- --api-token create --name n8n --scopes read,operate`.
 
 ```bash
 curl -s -X POST http://127.0.0.1:3000/api/jovi/goal \
@@ -142,7 +142,7 @@ The CLI calls the same `JoviOrchestrator.executeGoal()` as the API.
 
 ## API
 
-Every route except `/health` requires `Authorization: Bearer <token>` with the right **scope**: `read` (GET), `operate` (goals, planning, productions, regeneration, memory, evaluation), `approve` (`/decision`), `identity-admin` (`POST /api/visual-identity`). Requests whose `Host` or `Origin` is not allow-listed get `403` (DNS-rebinding defence).
+Every route except `/health` requires `Authorization: Bearer <token>` with the right **scope**: `read` (GET), `operate` (goals, planning, productions, regeneration, memory, evaluation), `approve` (`/decision`), `identity-admin` (`POST /api/visual-identity`), `audit` (`/api/events`, `/api/audit/verify`). Requests whose `Host` or `Origin` is not allow-listed get `403` (DNS-rebinding defence).
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -156,7 +156,7 @@ Every route except `/health` requires `Authorization: Bearer <token>` with the r
 | GET | `/api/tasks/:id` | Task + its jobs |
 | GET | `/api/jobs/:id` | Job |
 | GET | `/api/decisions/:id` | Decision (options, selection, evaluation, models used) |
-| GET | `/api/audit/verify` | (`approve` scope) Verify the event hash chain; returns its head `{sequence, hash}` |
+| GET | `/api/audit/verify` | (`audit` scope) Verify the event hash chain; returns its head `{sequence, hash}` |
 | GET | `/api/events` | Events (`type`, `correlationId`, `entityId`, `afterSequence`, `limit`) |
 | POST | `/api/memory` | Add untrusted external memory (restricted types; see Security) |
 | GET | `/api/memory` | List (`type`, `key`, `includeExpired`) or search (`q`) memory |
@@ -208,6 +208,15 @@ Every route except `/health` requires `Authorization: Bearer <token>` with the r
   - **R-16:** destructive and filesystem phrasings in proposed actions classify as LEVEL_5.
   - **R-17:** optional SHA-256 pins for executables and ComfyUI workflows; a warning when LM Studio or ComfyUI is not on loopback. See `docs/security/trust-model.md`.
   - **R-18:** owner-only database permissions, retention, and backups. See `docs/security/data-at-rest.md`.
+- **Re-audit fixes** (`docs/audit/v2/06-remediation-status.md`):
+  - Negative prompts sent to media providers are code-authored only; the safety review refuses anything else.
+  - Visual-identity changes need an independent model review, and named real persons are refused.
+  - Retention checkpoints must be vouched for by a chained event.
+  - Unpriced cloud calls count against the budget at a worst-case price (`JOVI_UNPRICED_CALL_USD`).
+  - Media inputs are opened and verified by device and inode, and ffmpeg reads private copies.
+  - The owner token goes to `data/owner-token` (0600), never to the logs.
+  - The event log needs the `audit` scope, and asset paths are returned relative.
+  - The rollover token needs an expiry date.
 - **Supply chain** (R-07): `.github/workflows/ci.yml` runs typecheck, tests, build, `npm audit`, osv-scanner, a gitleaks scan of the full history and an SBOM artifact. It uses a read-only token, SHA-pinned actions and checksum-verified scanners. Dependabot covers npm, actions and the Docker base image, which is pinned by digest. Branch protection is an owner step: see `docs/security/sdlc-runbook.md`.
 - **Pre-generation safety gate** (R-02): after the visual prompts and before **any** media request, the `safety-review` agent runs the identity/safety heuristics and an independent model review against a fixed rubric (adult only, AI transparency, identity consistency, no real-person likeness, platform safety). Anything but a full ALLOW — including a model error or invalid output — is `BLOCK` (fail-closed) and the production stops `BLOCKED`. `MediaService` independently refuses to call a provider without a current ALLOW review (`SAFETY_REVIEW_REQUIRED` / `_BLOCKED` / `_STALE`). Pattern checks are labelled `HEURISTIC` in QA: they are not proof of compliance.
 - **Enforced permissions:** agents receive no services — only a per-run **ToolKit** whose every method checks the agent's allow-list and level (capped at `JOVI_MAX_PERMISSION_LEVEL`). Every call, allowed or denied, is stored in `agent_runs.tool_calls`. There are no shell, filesystem, credential, publishing or infrastructure tools. Executive = `LEVEL_2_MODIFY`. Artifact writes are scoped per kind (`production.write:SCRIPT`, …, `production.write:QA_REPORT`), so only the QA agent can record a QA verdict (R-10).
@@ -285,7 +294,7 @@ LM Studio runs on the host; the container reaches it at `host.docker.internal:12
 
   The CI job "Container (hardened compose)" builds the image and checks these settings on a running container.
 - **`./data` permissions.** `./data` must be writable by uid 1000 (`sudo chown 1000:1000 data` on Linux; Docker Desktop handles this on macOS).
-- **The owner token** is printed once in `docker compose logs jovi-core` on first start.
+- **The owner token** is written to `./data/owner-token` (mode 0600) on first start, never to the logs. Copy it, then delete the file.
 - **No ffmpeg, ffprobe or `say` in the image (D-18).** In the container the render and macOS voice providers report `NOT_CONFIGURED`, so productions stop `BLOCKED` at the render step. For real renders run Jovi on the host, or build a derived image with ffmpeg and pin it (`JOVI_FFMPEG_PATH` + `JOVI_FFMPEG_SHA256`).
 
 ## Observability & cost

@@ -78,9 +78,40 @@ export class VisualIdentityService {
     private readonly referenceCheck: (path: string) => boolean = () => true,
     /** R-08: the version event is a protected (attested) audit event emitted here, not by callers. */
     private readonly audit?: { bus: EventBus; attestation: EventAttestation },
-    /** R-19 (D-19): the core identity's age, so the visual identity cannot drift from it. */
-    private readonly identityAge?: () => number,
+    /** R-19 (D-19): the core identity's age (and names), so the visual identity cannot drift from it. */
+    private readonly identityFacts?: () => { age: number; names: string[] },
+    /** Re-audit R2-02: independent model review of human-entered anchors (fail-closed). */
+    private readonly reviewer?: (anchors: string[]) => Promise<{ allow: boolean; reasons: string[] }>,
   ) {}
+
+  /**
+   * The entry point for humans (API and CLI). Runs the heuristic checks and
+   * the independent model review of the anchors before recording the version.
+   */
+  async createReviewedVersion(profile: VisualIdentity, approvedBy: string, changeSummary: string): Promise<ActiveVisualIdentity> {
+    const valid = VisualIdentitySchema.parse(profile);
+    this.assertAppearance(valid);
+    if (!this.reviewer) throw new ValidationError('visual identity review is not configured; refusing an unreviewed identity change');
+    const review = await this.reviewer(this.anchorTexts(valid));
+    if (!review.allow) throw new ValidationError(`visual identity rejected by the independent review: ${review.reasons.join('; ').slice(0, 600)}`);
+    return this.createVersion(valid, approvedBy, changeSummary);
+  }
+
+  private anchorTexts(valid: VisualIdentity): string[] {
+    return [valid.aesthetic, valid.platformSafety, ...LOCKABLE_FIELDS.map((f) => valid[f] ?? '')].filter((t) => t.trim());
+  }
+
+  private assertAppearance(valid: VisualIdentity): void {
+    const facts = this.identityFacts?.();
+    // R-11 / R2-02: human-entered anchors get the same likeness / minor / explicit checks as generated text.
+    const violations = findAppearanceViolations(this.anchorTexts(valid), facts?.names ?? []);
+    if (violations.length) {
+      throw new ValidationError(`visual identity rejected: ${violations.map((v) => `${v.rule} ("${v.match}")`).join('; ')}. Jovi is an original adult virtual character who must not resemble a real person.`);
+    }
+    if (facts && valid.apparentAge !== facts.age) {
+      throw new ValidationError(`apparentAge ${valid.apparentAge} contradicts the active identity (age ${facts.age}); the core identity is immutable`);
+    }
+  }
 
   listVersions(): Array<{ version: number; status: 'NOT_LOCKED' | 'LOCKED'; isActive: boolean; approvedBy: string; changeSummary: string; createdAt: string }> {
     return this.db
@@ -116,7 +147,7 @@ export class VisualIdentityService {
         status: 'NOT_LOCKED',
         isActive: true,
         // D-19: apparent age comes from the core identity when it is available.
-        profile: { ...INITIAL_VISUAL_IDENTITY, apparentAge: this.identityAge?.() ?? INITIAL_VISUAL_IDENTITY.apparentAge },
+        profile: { ...INITIAL_VISUAL_IDENTITY, apparentAge: this.identityFacts?.().age ?? INITIAL_VISUAL_IDENTITY.apparentAge },
         approvedBy: 'phase-5-specification',
         changeSummary: 'Initial constraints; appearance anchors not yet locked (visual bible: to be locked in the visual phase).',
         createdAt: nowIso(),
@@ -129,15 +160,7 @@ export class VisualIdentityService {
   createVersion(profile: VisualIdentity, approvedBy: string, changeSummary: string): ActiveVisualIdentity {
     if (!approvedBy.trim()) throw new ValidationError('approvedBy is required for visual identity changes');
     const valid = VisualIdentitySchema.parse(profile);
-    // R-11: human-entered anchors get the same likeness / minor / explicit checks as generated text.
-    const violations = findAppearanceViolations([valid.aesthetic, valid.platformSafety, ...LOCKABLE_FIELDS.map((f) => valid[f] ?? '')]);
-    if (violations.length) {
-      throw new ValidationError(`visual identity rejected: ${violations.map((v) => `${v.rule} ("${v.match}")`).join('; ')}. Jovi is an original adult virtual character who must not resemble a real person.`);
-    }
-    const age = this.identityAge?.();
-    if (age !== undefined && valid.apparentAge !== age) {
-      throw new ValidationError(`apparentAge ${valid.apparentAge} contradicts the active identity (age ${age}); the core identity is immutable`);
-    }
+    this.assertAppearance(valid);
     const badReferences = valid.referenceImages.filter((path) => !this.referenceCheck(path));
     if (badReferences.length) {
       throw new ValidationError(`reference images must be existing files inside the reference or media directory: ${badReferences.join(', ')}`);

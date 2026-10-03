@@ -1,3 +1,5 @@
+import { closeSync, constants, existsSync, openSync, unlinkSync, writeSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createJoviCore } from '../../src/core/bootstrap.js';
 import { loadConfig, redactConfig } from '../../src/core/config/config.js';
 import { loadEnvFile } from '../../src/core/config/load-env.js';
@@ -21,28 +23,42 @@ async function main(): Promise<void> {
   );
   if (bindWarning) core.logger.warn(bindWarning);
 
-  // Authentication is mandatory (R-01). On first run, create an owner credential
-  // and show its token exactly once; only its SHA-256 hash is stored.
+  // Authentication is mandatory (R-01). On first run, create an owner credential;
+  // only its SHA-256 hash is stored. Re-audit R2-07: the token is written once to an
+  // owner-only file next to the database instead of the logs (logs are retained by
+  // Docker, journald or launchd and are readable more widely than data/).
   if (!core.credentials.hasUsableCredential()) {
-    const { token } = core.credentials.create('owner', ALL_SCOPES, 'bootstrap:first-run');
+    const name = core.credentials.list().some((c) => c.name === 'owner') ? `owner-${Date.now()}` : 'owner';
+    const { token } = core.credentials.create(name, ALL_SCOPES, 'bootstrap:first-run');
+    const tokenFile = core.database.url === ':memory:' ? null : join(dirname(core.database.url), 'owner-token');
+    if (tokenFile) {
+      if (existsSync(tokenFile)) unlinkSync(tokenFile);
+      const fd = openSync(tokenFile, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+      try {
+        writeSync(fd, `${token}\n`);
+      } finally {
+        closeSync(fd);
+      }
+    }
     process.stderr.write(
       [
         '',
         '================================================================================',
-        ' Jovi API: no credential existed, so an OWNER credential was created.',
-        ` Token (shown ONCE, scopes ${ALL_SCOPES.join(',')}):`,
+        ` Jovi API: no credential existed, so an OWNER credential was created ("${name}").`,
+        tokenFile ? ` Its token (scopes ${ALL_SCOPES.join(',')}) was written ONCE to:` : ` Token (in-memory database; shown ONCE, scopes ${ALL_SCOPES.join(',')}):`,
         '',
-        `   ${token}`,
+        `   ${tokenFile ?? token}`,
         '',
+        tokenFile ? ' Copy it into a password manager, then DELETE that file.' : '',
         ' Use it as:  Authorization: Bearer <token>',
-        ' Store it in a password manager. Create narrower credentials for automation:',
+        ' Create narrower credentials for automation:',
         '   npm run jovi -- --api-token create --name n8n --scopes read,operate',
-        ' Revoke with: npm run jovi -- --api-token revoke --name owner',
+        ` Rotate or revoke with: npm run jovi -- --api-token rotate|revoke --name ${name}`,
         '================================================================================',
         '',
       ].join('\n'),
     );
-    core.logger.warn({ credential: 'owner' }, 'created first-run owner API credential (token printed once to stderr)');
+    core.logger.warn({ credential: name, tokenFile }, 'created first-run owner API credential');
   }
   const statuses = await core.providers.statusesFresh(true);
   for (const s of statuses) {

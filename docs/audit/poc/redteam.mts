@@ -619,7 +619,7 @@ async function main() {
     const c = await core({ JOVI_SIMULATION_MODE: 'true' });
     const app = buildApiServer(c);
     await app.ready();
-    const headers = token(c, ['read', 'operate']);
+    const headers = token(c, ['read', 'operate', 'audit']);
     await app.inject({ method: 'POST', url: '/api/jovi/goal', headers, payload: { goal: 'Create a Reel concept for Jovi' } });
     const total = (await app.inject({ method: 'GET', url: '/api/events?limit=1000', headers })).json().count;
     const inj = await app.inject({ method: 'GET', url: `/api/events?correlationId=${encodeURIComponent("x' OR '1'='1")}&limit=1000`, headers });

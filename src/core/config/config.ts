@@ -101,6 +101,8 @@ const EnvSchema = z.object({
   JOVI_API_TOKEN: optionalSecret,
   /** R-13: the previous operator token, accepted alongside JOVI_API_TOKEN during a rollover. */
   JOVI_API_TOKEN_PREVIOUS: optionalSecret,
+  /** Re-audit R2-09 (N-12): required with JOVI_API_TOKEN_PREVIOUS; at most 30 days ahead. */
+  JOVI_API_TOKEN_PREVIOUS_EXPIRES_AT: optionalString,
   /** Scopes granted to JOVI_API_TOKEN (default: read,operate — no approval, no identity changes). */
   JOVI_API_TOKEN_SCOPES: z.string().default('read,operate'),
   /** Host header values the API answers to (DNS-rebinding defence). Loopback names are always allowed. */
@@ -121,6 +123,8 @@ const EnvSchema = z.object({
   JOVI_SUPERSEDED_RETENTION_DAYS: z.coerce.number().int().min(0).default(7),
   /** Daily cap on estimated cloud spend (model + media). 0 disables cloud providers. */
   JOVI_DAILY_CLOUD_BUDGET_USD: z.coerce.number().min(0).default(10),
+  /** Worst-case USD counted for a cloud call with no price estimate (unlisted model, ElevenLabs). */
+  JOVI_UNPRICED_CALL_USD: z.coerce.number().min(0).default(0.05),
 
   /** Phase 8 media. ComfyUI is optional; unset = image/video providers report NOT_CONFIGURED. */
   COMFYUI_URL: optionalString,
@@ -199,7 +203,7 @@ export type JoviConfig = {
     maxQueued: number;
   };
   /** R-05: daily estimated cloud spend cap (USD, UTC day). */
-  budget: { dailyCloudUsd: number };
+  budget: { dailyCloudUsd: number; unpricedCallUsd: number };
   memory: { maxExternalItems: number };
   permissions: { maxLevel: PermissionLevel };
   api: {
@@ -207,6 +211,7 @@ export type JoviConfig = {
     port: number;
     token: string | undefined;
     previousToken: string | undefined;
+    previousTokenExpiresAt: string | undefined;
     tokenScopes: ApiScope[];
     allowedHosts: string[];
     allowedOrigins: string[];
@@ -268,6 +273,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
   if (parsed.JOVI_API_TOKEN_PREVIOUS) {
     if (!parsed.JOVI_API_TOKEN) throw new ValidationError('JOVI_API_TOKEN_PREVIOUS is only valid together with JOVI_API_TOKEN (rollover)');
     assertStrongToken(parsed.JOVI_API_TOKEN_PREVIOUS, 'JOVI_API_TOKEN_PREVIOUS');
+    const until = Date.parse(parsed.JOVI_API_TOKEN_PREVIOUS_EXPIRES_AT ?? '');
+    if (!Number.isFinite(until) || until > Date.now() + 30 * 86_400_000) {
+      throw new ValidationError('JOVI_API_TOKEN_PREVIOUS needs JOVI_API_TOKEN_PREVIOUS_EXPIRES_AT (an ISO date at most 30 days ahead) so the rollover window ends');
+    }
   }
   const warnings = Object.entries(OBSOLETE_VARIABLES)
     .filter(([name]) => env[name] !== undefined && env[name] !== '')
@@ -318,7 +327,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
       heartbeatMs: Math.min(parsed.JOVI_JOB_HEARTBEAT_MS, Math.floor(parsed.JOVI_JOB_STALE_MS / 3)),
       maxQueued: parsed.JOVI_MAX_QUEUED_JOBS,
     },
-    budget: { dailyCloudUsd: parsed.JOVI_DAILY_CLOUD_BUDGET_USD },
+    budget: { dailyCloudUsd: parsed.JOVI_DAILY_CLOUD_BUDGET_USD, unpricedCallUsd: parsed.JOVI_UNPRICED_CALL_USD },
     memory: { maxExternalItems: parsed.JOVI_MAX_EXTERNAL_MEMORY_ITEMS },
     permissions: { maxLevel: parsed.JOVI_MAX_PERMISSION_LEVEL },
     api: {
@@ -326,6 +335,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): JoviConfig {
       port: parsed.PORT,
       token: parsed.JOVI_API_TOKEN,
       previousToken: parsed.JOVI_API_TOKEN_PREVIOUS,
+      previousTokenExpiresAt: parsed.JOVI_API_TOKEN_PREVIOUS_EXPIRES_AT,
       tokenScopes: parseScopes(parsed.JOVI_API_TOKEN_SCOPES),
       allowedHosts: allowedHostsFor(parsed.HOST, parsed.JOVI_ALLOWED_HOSTS),
       allowedOrigins: list(parsed.JOVI_ALLOWED_ORIGINS).map((o) => o.replace(/\/+$/, '').toLowerCase()),

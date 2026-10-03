@@ -137,7 +137,10 @@ describe('R-13 token policy and rotation', () => {
   it('accepts the previous operator token during a rollover', async () => {
     const current = createHash('sha256').update('current').digest('base64');
     const previous = createHash('sha256').update('previous').digest('base64');
-    core = await createTestCore({ env: { JOVI_API_TOKEN: current, JOVI_API_TOKEN_PREVIOUS: previous } });
+    const expiresAt = new Date(Date.now() + 7 * 86_400_000).toISOString();
+    expect(() => loadConfig({ JOVI_API_TOKEN: current, JOVI_API_TOKEN_PREVIOUS: previous })).toThrow(/EXPIRES_AT/);
+    expect(() => loadConfig({ JOVI_API_TOKEN: current, JOVI_API_TOKEN_PREVIOUS: previous, JOVI_API_TOKEN_PREVIOUS_EXPIRES_AT: '2099-01-01T00:00:00Z' })).toThrow(/30 days/);
+    core = await createTestCore({ env: { JOVI_API_TOKEN: current, JOVI_API_TOKEN_PREVIOUS: previous, JOVI_API_TOKEN_PREVIOUS_EXPIRES_AT: expiresAt } });
     const app = buildApiServer(core);
     const whoami = (token: string) => app.inject({ method: 'GET', url: '/api/auth/whoami', headers: { authorization: `Bearer ${token}` } });
     expect((await whoami(current)).json().principal).toBe('env:JOVI_API_TOKEN');

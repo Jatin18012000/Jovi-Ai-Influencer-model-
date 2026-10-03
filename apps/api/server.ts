@@ -145,6 +145,20 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
     return payload;
   });
 
+  const roots: Array<[string, string]> = [
+    [core.mediaStore.root, 'media'],
+    [core.mediaStore.referenceRoot, 'references'],
+  ];
+  const relativizePaths = <T>(value: T): T => {
+    if (typeof value === 'string') {
+      for (const [root, label] of roots) if (value.startsWith(`${root}/`)) return `${label}/${value.slice(root.length + 1)}` as T;
+      return value;
+    }
+    if (Array.isArray(value)) return value.map((v) => relativizePaths(v)) as T;
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, relativizePaths(v)])) as T;
+    return value;
+  };
+
   const actor = (request: FastifyRequest): string => {
     if (!request.principal) throw new PermissionDeniedError('no authenticated principal');
     return request.principal.id;
@@ -266,7 +280,9 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
   app.get('/api/productions/:id/assets', async (request) => {
     const { id } = IdParams.parse(request.params);
     core.productions.get(id);
-    return { productionId: id, assets: core.assets.list(id) };
+    // Re-audit R2-09 (N-08): file locations are returned relative to the media/reference
+    // directories, so API clients never learn the host's directory layout.
+    return { productionId: id, assets: relativizePaths(core.assets.list(id)) };
   });
 
   app.get('/api/productions/:id/publishing-gate', async (request) => {
@@ -323,7 +339,7 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
     const body = VisualIdentityVersionInputSchema.omit({ approvedBy: true }).strict().parse(request.body ?? {});
     const approvedBy = actor(request);
     writeLimiter.hit(`visual-identity:${approvedBy}`);
-    const active = core.visualIdentity.createVersion(body.profile, approvedBy, body.changeSummary);
+    const active = await core.visualIdentity.createReviewedVersion(body.profile, approvedBy, body.changeSummary);
     return reply.code(201).send({ active, versions: core.visualIdentity.listVersions() });
   });
 
@@ -354,9 +370,9 @@ export function buildApiServer(core: JoviCore, options: { limiter?: ExpensiveCal
    * R-08: verifies the whole event hash chain and returns its head (sequence +
    * hash) so it can be recorded outside this machine. O(events): approve scope.
    */
-  app.get('/api/audit/verify', { config: { scope: 'approve' } }, async () => ({ chain: core.events.verifyChain() }));
+  app.get('/api/audit/verify', { config: { scope: 'audit' } }, async () => ({ chain: core.events.verifyChain() }));
 
-  app.get('/api/events', async (request) => {
+  app.get('/api/events', { config: { scope: 'audit' } }, async (request) => {
     const q = EventsQuery.parse(request.query);
     const events = core.events.list({
       limit: q.limit,

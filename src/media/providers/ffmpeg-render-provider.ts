@@ -169,17 +169,30 @@ export class FFmpegRenderProvider implements EditingRenderProvider {
     if (!this.options.ffmpegPath) throw new ProviderError(this.id, 'JOVI_FFMPEG_PATH not set', { retryable: false });
     const parsed = RenderPlanSchema.safeParse(request.editPlan);
     if (!parsed.success) throw new ProviderError(this.id, `edit plan is not renderable: ${parsed.error.issues[0]?.message ?? 'invalid'}`, { retryable: false });
-    const inputs = new Map<string, string>();
+    const locations = new Map<string, string>();
     for (const input of request.inputs) {
       if (!this.store.holdsFile(input.location)) throw new ProviderError(this.id, `input ${input.assetId} is not a file inside the media store`, { retryable: false });
-      inputs.set(input.assetId, input.location);
+      locations.set(input.assetId, input.location);
+    }
+    // Re-audit R2-06: ffmpeg reads private copies made through verified descriptors, never the
+    // checked paths themselves (a parent directory could be swapped between check and open).
+    let staged: ReturnType<MediaStore['stageInputs']>;
+    try {
+      staged = this.store.stageInputs(locations);
+    } catch (error) {
+      throw new ProviderError(this.id, `inputs could not be staged safely: ${(error as Error).message}`, { retryable: false });
     }
     const srt = buildSrt(parsed.data.captions);
     const srtPath = srt ? this.store.writeSidecar(request.productionId, request.assetId, '.srt', srt) : null;
     const output = this.store.prepare(request.productionId, request.assetId, '.mp4');
-    const command = buildRenderCommand(parsed.data, inputs, output, srtPath);
+    const command = buildRenderCommand(parsed.data, staged.paths, output, srtPath);
     const started = Date.now();
-    const result = await runProcess(this.id, this.options.ffmpegPath, command.args, { timeoutMs: this.options.timeoutMs });
+    let result: Awaited<ReturnType<typeof runProcess>>;
+    try {
+      result = await runProcess(this.id, this.options.ffmpegPath, command.args, { timeoutMs: this.options.timeoutMs });
+    } finally {
+      staged.cleanup();
+    }
     if (result.code !== 0) {
       throw new ProviderError(this.id, `ffmpeg exited with code ${result.code}: ${result.stderr.replace(/\s+/g, ' ').slice(-400)}`, { retryable: false });
     }

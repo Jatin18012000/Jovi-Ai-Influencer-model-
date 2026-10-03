@@ -127,6 +127,11 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/status)" = "401"
           test "$(curl -s -o /dev/null -w '%{http_code}' -H 'host: evil.example' http://127.0.0.1:3000/health)" = "403"
           docker compose logs jovi-core | grep -q 'OWNER credential was created'
+          # Re-audit R2-07: the token is in an owner-only file, never in the logs.
+          test "$(docker compose exec -T jovi-core stat -c %a /app/data/owner-token)" = "600"
+          if docker compose logs jovi-core | grep -qE 'jovi_[A-Za-z0-9_-]{43}'; then echo "token found in logs"; exit 1; fi
+          token="$(docker compose exec -T jovi-core cat /app/data/owner-token | tr -d '\r\n')"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $token" http://127.0.0.1:3000/api/auth/whoami)" = "200"
       - name: Stop
         if: always()
         run: docker compose down -v
