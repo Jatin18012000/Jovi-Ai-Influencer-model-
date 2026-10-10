@@ -67,7 +67,7 @@ jobs:
         run: ./osv-scanner scan source --lockfile=package-lock.json --config=osv-scanner.toml
       - name: SBOM (CycloneDX, runtime dependencies)
         run: npm sbom --omit=dev --sbom-format=cyclonedx > sbom-runtime.cdx.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-runtime-cdx
           path: sbom-runtime.cdx.json
